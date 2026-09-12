@@ -662,6 +662,46 @@ async function supabaseAnmelden(email, passwort) {
   return daten; // { access_token, refresh_token, user }
 }
 
+// Erneuert eine abgelaufene Sitzung mit dem Refresh-Token, ohne dass die Person sich neu einloggen muss.
+async function supabaseSitzungErneuern(refreshToken) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+    method: "POST",
+    headers: { apikey: SUPABASE_ANON_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ refresh_token: refreshToken }),
+  });
+  const daten = await res.json();
+  if (!res.ok) throw new Error(daten.error_description || daten.msg || "Sitzung konnte nicht erneuert werden");
+  return daten;
+}
+
+// Prüft, ob ein Access-Token noch gültig ist (liefert den zugehörigen Nutzer oder wirft einen Fehler).
+async function supabaseAktuellerNutzer(accessToken) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+    headers: supabaseHeaders(accessToken),
+  });
+  if (!res.ok) throw new Error("Sitzung abgelaufen");
+  return res.json();
+}
+
+// Die Sitzung wird lokal im Browser gespeichert (nicht bei Claude selbst, sondern nur auf dem
+// Gerät der eingeloggten Person), damit ein Neuladen der Seite nicht jedes Mal zum Ausloggen führt.
+const SESSION_SPEICHER_SCHLUESSEL = "kidzcup_admin_sitzung";
+
+function sitzungSpeichern(session) {
+  try { window.localStorage.setItem(SESSION_SPEICHER_SCHLUESSEL, JSON.stringify(session)); } catch {}
+}
+function sitzungGeladen() {
+  try {
+    const roh = window.localStorage.getItem(SESSION_SPEICHER_SCHLUESSEL);
+    return roh ? JSON.parse(roh) : null;
+  } catch {
+    return null;
+  }
+}
+function sitzungLoeschen() {
+  try { window.localStorage.removeItem(SESSION_SPEICHER_SCHLUESSEL); } catch {}
+}
+
 async function supabaseAbmelden(accessToken) {
   try {
     await fetch(`${SUPABASE_URL}/auth/v1/logout`, {
@@ -1750,6 +1790,7 @@ function monateSeitDatum(datumIso) {
 
 function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spielplaene, setSpielplaene, dokumente, setDokumente, belegtePlaetze, jetzt }) {
   const [session, setSession] = useState(null); // { access_token, user }
+  const [sitzungWirdGeprueft, setSitzungWirdGeprueft] = useState(true);
   const [adminProfil, setAdminProfil] = useState(null); // Zeile aus admin_profile: { user_id, name, email, erstellt_am }
   const [admins, setAdmins] = useState([]); // alle admin_profile-Einträge, für "Admins verwalten"
   const [profilLaedt, setProfilLaedt] = useState(false);
@@ -1777,10 +1818,41 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
     }
   };
 
+  // Beim ersten Laden: prüfen, ob eine gespeicherte Sitzung von einem früheren Login existiert,
+  // damit man nach dem Neuladen der Seite nicht jedes Mal neu eingeloggt werden muss.
+  useEffect(() => {
+    (async () => {
+      const gespeichert = sitzungGeladen();
+      if (!gespeichert) { setSitzungWirdGeprueft(false); return; }
+      try {
+        await supabaseAktuellerNutzer(gespeichert.access_token);
+        setSession(gespeichert);
+        await nachLoginProfilLaden(gespeichert);
+      } catch {
+        try {
+          const erneuert = await supabaseSitzungErneuern(gespeichert.refresh_token);
+          sitzungSpeichern(erneuert);
+          setSession(erneuert);
+          await nachLoginProfilLaden(erneuert);
+        } catch {
+          sitzungLoeschen();
+        }
+      } finally {
+        setSitzungWirdGeprueft(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  if (sitzungWirdGeprueft) {
+    return <div className="kc-section">Lädt …</div>;
+  }
+
   if (!session) {
     return (
       <AdminLogin
         onErfolg={async (neueSession) => {
+          sitzungSpeichern(neueSession);
           setSession(neueSession);
           await nachLoginProfilLaden(neueSession);
         }}
@@ -1811,6 +1883,7 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
 
   const abmelden = async () => {
     await supabaseAbmelden(session.access_token);
+    sitzungLoeschen();
     setSession(null);
     setAdminProfil(null);
     setAdmins([]);
@@ -2146,7 +2219,7 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
                         <div className="kc-admin-aktionen kc-admin-aktionen--klein">
                           <a
                             className="kc-btn kc-btn--sekundaer kc-btn--klein"
-                            href={whatsappLink(a.telefon, `Hallo ${a.trainer}, hier meldet sich KIDZCUP bezüglich eurer Anmeldung für "${turnier.name}".`)}
+                            href={whatsappLink(a.telefon, `Hallo ${a.trainer}, hier meldet sich KIDZCUP bezüglich eurer Anmeldung für "${t.name}".`)}
                             target="_blank"
                             rel="noopener"
                           >
