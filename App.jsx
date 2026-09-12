@@ -1354,6 +1354,7 @@ function AnmeldeStatusKarte({ anmeldung, turnier, jetzt, alsBezahltMelden, fotoE
   const status = effektiverStatus(anmeldung, jetzt);
   const restMs = anmeldung.frist ? anmeldung.frist - jetzt : null;
   const [zahlungsreferenz, setZahlungsreferenz] = useState("");
+  const [zahlungBestaetigt, setZahlungBestaetigt] = useState(false);
   const [zeigeMeineDaten, setZeigeMeineDaten] = useState(false);
 
   const loeschenBestaetigen = () => {
@@ -1399,10 +1400,19 @@ function AnmeldeStatusKarte({ anmeldung, turnier, jetzt, alsBezahltMelden, fotoE
                 value={zahlungsreferenz}
                 onChange={(e) => setZahlungsreferenz(e.target.value)}
               />
-              <button className="kc-btn kc-btn--sekundaer" onClick={() => alsBezahltMelden(anmeldung.id, zahlungsreferenz)}>
-                Ich habe bereits bezahlt
-              </button>
             </div>
+            <label className="kc-checkbox-zeile" style={{ marginTop: "10px" }}>
+              <input type="checkbox" checked={zahlungBestaetigt} onChange={(e) => setZahlungBestaetigt(e.target.checked)} />
+              <span>Ich bestätige, dass ich die Startgebühr von {turnier.preis} € tatsächlich bereits überwiesen habe. Der Veranstalter prüft die Zahlung vor der endgültigen Bestätigung; eine wahrheitswidrige Angabe kann zum Ausschluss vom Turnier führen.</span>
+            </label>
+            <button
+              className="kc-btn kc-btn--sekundaer"
+              style={{ marginTop: "10px" }}
+              disabled={!zahlungBestaetigt}
+              onClick={() => alsBezahltMelden(anmeldung.id, zahlungsreferenz)}
+            >
+              Ich habe bereits bezahlt
+            </button>
           </div>
         )}
 
