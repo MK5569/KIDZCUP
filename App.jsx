@@ -1393,10 +1393,14 @@ function TeilnahmebedingungenText() {
         oder Gesundheit). Für Wertsachen und persönliche Gegenstände wird keine Haftung übernommen.
       </p>
 
-      <strong>4. Absage oder Abbruch des Turniers</strong>
+      <strong>4. Absage des Turniers oder der Teilnahme</strong>
       <p>
-        Muss das Turnier aus wichtigem Grund (z. B. Unwetter, behördliche Anordnung) abgesagt oder
-        abgebrochen werden, wird die bereits gezahlte Startgebühr vollständig zurückerstattet.
+        Muss das Turnier aus wichtigem Grund (z. B. Unwetter, behördliche Anordnung) vom Veranstalter
+        abgesagt werden, wird die bereits gezahlte Startgebühr vollständig zurückerstattet.
+      </p>
+      <p>
+        Sagt hingegen eine Mannschaft ihre Teilnahme ab, wird die bereits gezahlte Startgebühr
+        unabhängig vom Zeitpunkt der Absage <strong>nicht</strong> zurückerstattet.
       </p>
 
       <strong>5. Bild- und Tonaufnahmen</strong>
