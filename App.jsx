@@ -905,6 +905,9 @@ export default function App() {
           <button className={ansicht === "teilnehmer" ? "kc-chip kc-chip--active" : "kc-chip"} onClick={() => setAnsicht("teilnehmer")}>
             Anmeldung
           </button>
+          <button className={ansicht === "sponsor" ? "kc-chip kc-chip--active" : "kc-chip"} onClick={() => setAnsicht("sponsor")}>
+            Sponsoring
+          </button>
           <button className={ansicht === "admin" ? "kc-chip kc-chip--active" : "kc-chip"} onClick={() => setAnsicht("admin")}>
             Admin
           </button>
@@ -914,7 +917,7 @@ export default function App() {
       {ladeFehler && <div className="kc-fehler" style={{ margin: "12px 18px" }}>{ladeFehler}</div>}
 
       <main className="kc-main">
-        {ansicht === "teilnehmer" ? (
+        {ansicht === "teilnehmer" && (
           <TeilnehmerAnsicht
             turniere={turniere}
             belegtePlaetze={belegtePlaetze}
@@ -924,7 +927,9 @@ export default function App() {
             deepLink={deepLink}
             jetzt={jetzt}
           />
-        ) : (
+        )}
+        {ansicht === "sponsor" && <SponsorAnsicht />}
+        {ansicht === "admin" && (
           <AdminAnsicht
             turniere={turniere}
             setTurniere={setTurniere}
@@ -1872,6 +1877,119 @@ function monateSeitDatum(datumIso) {
   const jetzt = new Date();
   return (jetzt.getFullYear() - dann.getFullYear()) * 12 + (jetzt.getMonth() - dann.getMonth());
 }
+
+// ---------- Sponsoring-Ansicht ----------
+//
+// Bewusst ohne eigene Datenbank-Tabelle gehalten: Das Formular sammelt die Angaben
+// nur, um daraus eine vorausgefüllte WhatsApp-Nachricht an den Veranstalter zu bauen.
+// Der Sponsor tippt am Ende in seiner eigenen WhatsApp-App nur noch auf "Senden" -
+// alle Daten landen damit direkt und vollständig im Chat, ohne Umweg über eine Datenbank.
+
+const SPONSOR_BUDGET_OPTIONEN = [
+  "unter 250 €",
+  "250 – 500 €",
+  "500 – 1.000 €",
+  "1.000 – 2.500 €",
+  "mehr als 2.500 €",
+  "Sachleistung / anderes Angebot",
+];
+
+function SponsorAnsicht() {
+  const [form, setForm] = useState({ firma: "", ansprechpartner: "", email: "", telefon: "", budget: "", nachricht: "" });
+  const feld = (name) => (e) => setForm({ ...form, [name]: e.target.value });
+
+  const gueltig = form.firma.trim() && form.ansprechpartner.trim() && form.email.trim();
+
+  const whatsappNachricht = [
+    "Hallo KidzCup-Team,",
+    "",
+    "wir möchten uns gerne als Sponsor bewerben:",
+    "",
+    `Firma: ${form.firma || "–"}`,
+    `Ansprechpartner: ${form.ansprechpartner || "–"}`,
+    `E-Mail: ${form.email || "–"}`,
+    form.telefon ? `Telefon: ${form.telefon}` : null,
+    `Geplantes Budget: ${form.budget || "noch offen"}`,
+    form.nachricht ? "" : null,
+    form.nachricht ? "Nachricht:" : null,
+    form.nachricht || null,
+  ].filter((zeile) => zeile !== null).join("\n");
+
+  return (
+    <div>
+      <section className="kc-section">
+        <h1 className="kc-h1">Sponsor werden</h1>
+        <p className="kc-sub">
+          Werdet Partner von {VERANSTALTER.name} und unterstützt den Jugendfußball in der Region.
+          Füllt kurz eure Angaben aus – im letzten Schritt öffnet sich WhatsApp mit einer bereits
+          vorausgefüllten Nachricht direkt an uns.
+        </p>
+      </section>
+
+      <div className="kc-formular kc-formular-karte kc-section">
+        <label className="kc-feld">
+          <span>Firma *</span>
+          <input className="kc-input" value={form.firma} onChange={feld("firma")} placeholder="Firmenname" required />
+        </label>
+        <label className="kc-feld">
+          <span>Ansprechpartner *</span>
+          <input className="kc-input" value={form.ansprechpartner} onChange={feld("ansprechpartner")} placeholder="Vor- und Nachname" required />
+        </label>
+        <div className="kc-feld-reihe">
+          <label className="kc-feld">
+            <span>E-Mail *</span>
+            <input className="kc-input" type="email" value={form.email} onChange={feld("email")} required />
+          </label>
+          <label className="kc-feld">
+            <span>Telefon (optional)</span>
+            <input className="kc-input" type="tel" value={form.telefon} onChange={feld("telefon")} />
+          </label>
+        </div>
+        <label className="kc-feld">
+          <span>Geplantes Sponsoring-Budget</span>
+          <select className="kc-input" value={form.budget} onChange={feld("budget")}>
+            <option value="">Bitte wählen (optional)…</option>
+            {SPONSOR_BUDGET_OPTIONEN.map((opt) => (
+              <option key={opt} value={opt}>{opt}</option>
+            ))}
+          </select>
+        </label>
+        <label className="kc-feld">
+          <span>Nachricht (optional)</span>
+          <textarea
+            className="kc-input kc-textarea"
+            rows={4}
+            value={form.nachricht}
+            onChange={feld("nachricht")}
+            placeholder="Erzählt uns von euren Ideen, Wünschen oder Fragen zum Sponsoring …"
+          />
+        </label>
+
+        <p className="kc-notiz">* Pflichtangabe</p>
+
+        {gueltig ? (
+          <a
+            className="kc-btn kc-btn--primary"
+            href={whatsappLink(VERANSTALTER.telefon, whatsappNachricht)}
+            target="_blank"
+            rel="noopener"
+          >
+            📱 Jetzt per WhatsApp Kontakt aufnehmen
+          </a>
+        ) : (
+          <button className="kc-btn kc-btn--primary" type="button" disabled>
+            📱 Jetzt per WhatsApp Kontakt aufnehmen
+          </button>
+        )}
+        <p className="kc-notiz">
+          Beim Klick öffnet sich WhatsApp mit einer vorausgefüllten Nachricht an {VERANSTALTER.name} –
+          ihr müsst dort nur noch auf „Senden" tippen.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 
 function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, dokumente, setDokumente, jetzt, belegungNeuLaden }) {
   const [session, setSession] = useState(null); // { access_token, user }
