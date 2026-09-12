@@ -20,6 +20,16 @@ function neueId(prefix) {
   return prefix + "_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
 }
 
+// Sorgt dafür, dass Zahlungslinks auch dann funktionieren, wenn beim Anlegen des Turniers
+// aus Versehen "https://" vergessen wurde (sonst versucht der Browser, den Link relativ zur
+// eigenen Seite zu interpretieren, statt zu z. B. PayPal weiterzuleiten).
+function normalisiereLink(url) {
+  if (!url) return url;
+  const bereinigt = url.trim();
+  if (/^https?:\/\//i.test(bereinigt)) return bereinigt;
+  return "https://" + bereinigt;
+}
+
 function formatDatum(iso) {
   if (!iso) return "–";
   try {
@@ -1375,7 +1385,7 @@ function AnmeldeStatusKarte({ anmeldung, turnier, jetzt, alsBezahltMelden, fotoE
 
         {status === "ausstehend" && turnier && turnier.zahlLink && (
           <div className="kc-zahl-block">
-            <a className="kc-btn kc-btn--primary" href={turnier.zahlLink} target="_blank" rel="noopener noreferrer">
+            <a className="kc-btn kc-btn--primary" href={normalisiereLink(turnier.zahlLink)} target="_blank" rel="noopener">
               Startgebühr jetzt bezahlen ({turnier.preis} €)
             </a>
             <div className="kc-zahlreferenz-zeile">
