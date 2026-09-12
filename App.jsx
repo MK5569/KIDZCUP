@@ -97,7 +97,7 @@ function csvEscape(feld) {
 function anmeldungenAlsCsv(liste, turniere, jetzt) {
   const kopf = [
     "Turnier", "Verein", "Trainer", "Jahrgang", "Jugend", "E-Mail", "Telefon", "Notfallkontakt",
-    "Status", "Angemeldet am", "Zahlungsfrist", "Zahlungsreferenz", "Foto-/Videoeinverständnis", "Bearbeitet von",
+    "Status", "Angemeldet am", "Zahlungsfrist", "Zahlungsreferenz", "Gebührenfrei", "Foto-/Videoeinverständnis", "Bearbeitet von",
   ];
   const zeilen = liste.map((a) => {
     const t = turniere.find((tt) => tt.id === a.turnierId);
@@ -109,6 +109,7 @@ function anmeldungenAlsCsv(liste, turniere, jetzt) {
       formatDatumZeit(a.angemeldetAm),
       a.frist ? formatDatumZeit(a.frist) : "–",
       a.zahlungsreferenz || "",
+      a.gebuehrenfrei ? "Ja" : "Nein",
       a.fotoEinverstaendnis ? "Ja" : "Nein",
       a.bearbeitetVon || "",
     ].map(csvEscape).join(",");
@@ -195,11 +196,14 @@ function mailVorlage(typ, anmeldung, turnier) {
     };
   }
   if (typ === "bestaetigung") {
+    const einleitung = anmeldung.gebuehrenfrei
+      ? "euer Team ist von der Startgebühr befreit"
+      : "eure Zahlung ist bei uns eingegangen";
     return {
       betreff: `Teilnahme bestätigt – ${turnier?.name || "KIDZCUP"}`,
       text:
         `Hallo ${anmeldung.trainer || ""},\n\n` +
-        `eure Zahlung ist bei uns eingegangen – die Teilnahme von ${anmeldung.verein} (Jahrgang ${anmeldung.jahrgang}, ${anmeldung.jugend}) ` +
+        `${einleitung} – die Teilnahme von ${anmeldung.verein} (Jahrgang ${anmeldung.jahrgang}, ${anmeldung.jugend}) ` +
         `am Turnier "${turnier?.name}" am ${termin} steht damit fest.\n\n` +
         `Wir freuen uns auf euch!\n\n${gruss}`,
     };
@@ -531,12 +535,15 @@ function zahlungsBelegHerunterladen(anmeldung, turnier) {
 
   doc.setFontSize(12);
   doc.text("Startgebühr", 14, y);
-  doc.text(`${turnier.preis.toFixed(2)} €`, 160, y);
+  doc.text(anmeldung.gebuehrenfrei ? "befreit (0 €)" : `${turnier.preis.toFixed(2)} €`, 160, y);
   y += 10;
 
   doc.setFontSize(10);
   doc.setTextColor(30, 110, 60);
-  doc.text(`Status: Zahlung bestätigt${anmeldung.bestaetigtAm ? " am " + formatDatumZeit(anmeldung.bestaetigtAm) : ""}`, 14, y);
+  const statusText = anmeldung.gebuehrenfrei
+    ? `Status: Gebührenfrei bestätigt${anmeldung.bestaetigtAm ? " am " + formatDatumZeit(anmeldung.bestaetigtAm) : ""}`
+    : `Status: Zahlung bestätigt${anmeldung.bestaetigtAm ? " am " + formatDatumZeit(anmeldung.bestaetigtAm) : ""}`;
+  doc.text(statusText, 14, y);
   doc.setTextColor(0, 0, 0);
   y += 14;
 
@@ -762,6 +769,7 @@ function anmeldungAusDb(a) {
     datenschutzAkzeptiertAm: a.datenschutz_akzeptiert_am, teilnahmebedingungenAkzeptiertAm: a.teilnahmebedingungen_akzeptiert_am,
     bearbeitetVon: a.bearbeitet_von,
     bestaetigtAm: a.bestaetigt_am ? new Date(a.bestaetigt_am).getTime() : null,
+    gebuehrenfrei: !!a.gebuehrenfrei,
   };
 }
 function anmeldungZuDb(a) {
@@ -1528,10 +1536,13 @@ function AnmeldeStatusKarte({ anmeldung, turnier, jetzt, alsBezahltMelden, fotoE
         )}
         {status === "bestaetigt" && (
           <>
-            <p className="kc-hinweis kc-hinweis--erfolg">Deine Teilnahme steht fest – wir freuen uns auf dich beim Turnier!</p>
+            <p className="kc-hinweis kc-hinweis--erfolg">
+              Deine Teilnahme steht fest – wir freuen uns auf dich beim Turnier!
+              {anmeldung.gebuehrenfrei && " Euer Team ist von der Startgebühr befreit."}
+            </p>
             {turnier && (
               <button className="kc-btn kc-btn--sekundaer" onClick={() => zahlungsBelegHerunterladen(anmeldung, turnier)}>
-                📄 Zahlungsbeleg herunterladen
+                📄 {anmeldung.gebuehrenfrei ? "Bestätigung herunterladen" : "Zahlungsbeleg herunterladen"}
               </button>
             )}
           </>
@@ -2015,6 +2026,24 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     belegungNeuLaden();
   };
 
+  // Für Mannschaften, die keine Startgebühr zahlen müssen: direkt bestätigen, ganz ohne Zahlungsschritt.
+  const anmeldungKostenfreiAnnehmen = async (anmeldungId) => {
+    const anmeldung = anmeldungen.find((a) => a.id === anmeldungId);
+    const zeile = await supabaseUpdate(
+      "anmeldungen", anmeldungId,
+      { status: "bestaetigt", gebuehrenfrei: true, bestaetigt_am: new Date().toISOString(), bearbeitet_von: adminProfil.name || "" },
+      session.access_token
+    );
+    const aktualisierteAnmeldung = anmeldungAusDb(zeile[0]);
+    setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
+    belegungNeuLaden();
+    if (anmeldung) {
+      const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
+      benachrichtigeBackend("bestaetigung", aktualisierteAnmeldung, turnier);
+      mailOeffnen("bestaetigung", aktualisierteAnmeldung, turnier);
+    }
+  };
+
   const anmeldungAktualisieren = async (anmeldungId, neuerStatus) => {
     const anmeldung = anmeldungen.find((a) => a.id === anmeldungId);
     const daten = { status: neuerStatus, bearbeitet_von: adminProfil.name || "" };
@@ -2305,6 +2334,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                           <div className="kc-notiz">Frist: {formatDatumZeit(a.frist)}</div>
                           {a.zahlungsreferenz && <div className="kc-notiz">Referenz: {a.zahlungsreferenz}</div>}
                           {a.bearbeitetVon && <div className="kc-notiz">Bearbeitet von: {a.bearbeitetVon}</div>}
+                          {a.gebuehrenfrei && <div className="kc-notiz" style={{ color: "var(--kc-green)", fontWeight: 600 }}>🆓 Gebührenfrei</div>}
                         </div>
                         <span className="kc-status-badge kc-status-badge--klein" style={{ background: STATUS_FARBE[st] }}>
                           {STATUS_LABEL[st]}
@@ -2312,6 +2342,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                         {st === "eingegangen" && (
                           <div className="kc-admin-aktionen kc-admin-aktionen--klein">
                             <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAnnehmen(a.id)}>✅ Anmeldung annehmen</button>
+                            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => anmeldungKostenfreiAnnehmen(a.id)}>🆓 Kostenfrei annehmen</button>
                             <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => anmeldungAufWartelisteSetzen(a.id)}>Auf Warteliste setzen</button>
                             <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "abgelehnt")}>Ablehnen</button>
                           </div>
