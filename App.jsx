@@ -65,6 +65,7 @@ function effektiverStatus(reg, jetzt) {
 }
 
 const STATUS_LABEL = {
+  eingegangen: "Anmeldung eingegangen – wird geprüft",
   ausstehend: "Zahlung ausstehend",
   zahlung_gemeldet: "Zahlung gemeldet – wird geprüft",
   bestaetigt: "Teilnahme bestätigt",
@@ -74,6 +75,7 @@ const STATUS_LABEL = {
 };
 
 const STATUS_FARBE = {
+  eingegangen: "var(--kc-blue)",
   ausstehend: "var(--kc-gold)",
   zahlung_gemeldet: "var(--kc-blue)",
   bestaetigt: "var(--kc-green)",
@@ -171,6 +173,16 @@ function mailVorlage(typ, anmeldung, turnier) {
   const termin = turnier ? `${formatDatum(turnier.datum)} in ${turnier.ort}` : "";
   const gruss = `Sportliche Grüße\nDein KIDZCUP-Team`;
 
+  if (typ === "angenommen") {
+    return {
+      betreff: `Anmeldung angenommen – jetzt Startgebühr zahlen (${turnier?.name || "KIDZCUP"})`,
+      text:
+        `Hallo ${anmeldung.trainer || ""},\n\n` +
+        `eure Anmeldung von ${anmeldung.verein} für "${turnier?.name}" (${termin}) wurde angenommen.\n\n` +
+        `Bitte zahlt die Startgebühr von ${turnier?.preis} € bis spätestens ${frist} über folgenden Link:\n${turnier?.zahlLink || "(Zahlungslink beim Veranstalter erfragen)"}\n\n` +
+        `Ohne fristgerechte Zahlung können wir die Teilnahme leider nicht bestätigen.\n\n${gruss}`,
+    };
+  }
   if (typ === "erinnerung") {
     return {
       betreff: `Erinnerung: Zahlung für ${turnier?.name || "euer Turnier"} noch offen`,
@@ -973,8 +985,8 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
         turnierId: turnier.id,
         ...daten,
         angemeldetAm: jetztTs,
-        frist: aufWarteliste ? null : jetztTs + DREI_TAGE_MS,
-        status: aufWarteliste ? "warteliste" : "ausstehend",
+        frist: null, // startet erst, sobald der Admin die Anmeldung annimmt
+        status: aufWarteliste ? "warteliste" : "eingegangen",
       };
       const gespeichert = await supabaseRpc("oeffentliche_anmeldung_erstellen", { p_daten: anmeldungZuDb(neu) });
       const anmeldung = anmeldungAusDb(gespeichert);
@@ -1508,6 +1520,9 @@ function AnmeldeStatusKarte({ anmeldung, turnier, jetzt, alsBezahltMelden, fotoE
           </div>
         )}
 
+        {status === "eingegangen" && (
+          <p className="kc-hinweis">Danke für eure Anmeldung! Sie wird gerade vom Veranstalter geprüft. Sobald sie angenommen wurde, erscheint hier der Zahlungslink mit einer 3-Tage-Frist.</p>
+        )}
         {status === "zahlung_gemeldet" && (
           <p className="kc-hinweis">Danke! Deine Zahlung wird vom Veranstalter geprüft und in Kürze bestätigt.</p>
         )}
@@ -1932,7 +1947,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
 
   const belegtePlaetze = (turnierId) => {
     return anmeldungen.filter(
-      (a) => a.turnierId === turnierId && ["ausstehend", "zahlung_gemeldet", "bestaetigt"].includes(effektiverStatus(a, jetzt))
+      (a) => a.turnierId === turnierId && ["eingegangen", "ausstehend", "zahlung_gemeldet", "bestaetigt"].includes(effektiverStatus(a, jetzt))
     ).length;
   };
 
@@ -1966,6 +1981,38 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     setAnmeldungen((prev) => prev.filter((a) => a.turnierId !== id)); // DB löscht per on-delete-cascade mit
     setSpielplaene((prev) => prev.filter((p) => p.turnierId !== id));
     if (offenesTurnier === id) setOffenesTurnier(null);
+  };
+
+  // Neuer Zwischenschritt: Admin nimmt die Anmeldung an, erst jetzt startet die Zahlungsfrist.
+  const anmeldungAnnehmen = async (anmeldungId) => {
+    const anmeldung = anmeldungen.find((a) => a.id === anmeldungId);
+    const neueFrist = Date.now() + DREI_TAGE_MS;
+    const zeile = await supabaseUpdate(
+      "anmeldungen", anmeldungId,
+      { status: "ausstehend", frist: new Date(neueFrist).toISOString(), bearbeitet_von: adminProfil.name || "" },
+      session.access_token
+    );
+    const aktualisierteAnmeldung = anmeldungAusDb(zeile[0]);
+    setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
+    belegungNeuLaden();
+    if (anmeldung) {
+      const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
+      benachrichtigeBackend("angenommen", aktualisierteAnmeldung, turnier);
+      mailOeffnen("angenommen", aktualisierteAnmeldung, turnier);
+    }
+  };
+
+  // Admin kann eine neu eingegangene Anmeldung auch bewusst auf die Warteliste setzen,
+  // z. B. um zunächst Kapazität für andere/bevorzugte Vereine freizuhalten.
+  const anmeldungAufWartelisteSetzen = async (anmeldungId) => {
+    const zeile = await supabaseUpdate(
+      "anmeldungen", anmeldungId,
+      { status: "warteliste", frist: null, bearbeitet_von: adminProfil.name || "" },
+      session.access_token
+    );
+    const aktualisierteAnmeldung = anmeldungAusDb(zeile[0]);
+    setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
+    belegungNeuLaden();
   };
 
   const anmeldungAktualisieren = async (anmeldungId, neuerStatus) => {
@@ -2262,6 +2309,13 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                         <span className="kc-status-badge kc-status-badge--klein" style={{ background: STATUS_FARBE[st] }}>
                           {STATUS_LABEL[st]}
                         </span>
+                        {st === "eingegangen" && (
+                          <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+                            <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAnnehmen(a.id)}>✅ Anmeldung annehmen</button>
+                            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => anmeldungAufWartelisteSetzen(a.id)}>Auf Warteliste setzen</button>
+                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "abgelehnt")}>Ablehnen</button>
+                          </div>
+                        )}
                         {st === "zahlung_gemeldet" && (
                           <div className="kc-admin-aktionen kc-admin-aktionen--klein">
                             <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "bestaetigt")}>Bestätigen</button>
