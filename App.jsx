@@ -1388,6 +1388,10 @@ function AnmeldeStatusKarte({ anmeldung, turnier, jetzt, alsBezahltMelden, fotoE
             <a className="kc-btn kc-btn--primary" href={normalisiereLink(turnier.zahlLink)} target="_blank" rel="noopener">
               Startgebühr jetzt bezahlen ({turnier.preis} €)
             </a>
+            <p className="kc-notiz">
+              Öffnet sich eine App (z. B. PayPal) und findet euer Profil nicht? Link kurz gedrückt halten →
+              „Im Browser öffnen" wählen.
+            </p>
             <div className="kc-zahlreferenz-zeile">
               <input
                 className="kc-input"
