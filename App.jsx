@@ -1320,7 +1320,12 @@ function DatenschutzText() {
       </p>
 
       <strong>2. Welche Daten wir verarbeiten</strong>
-      <p>Im Rahmen der Turnieranmeldung erheben wir: Vereinsname, Name der Trainerin/des Trainers, Jahrgang der Mannschaft, E-Mail-Adresse und Telefonnummer der Kontaktperson.</p>
+      <p>
+        Im Rahmen der Turnieranmeldung erheben wir: Vereinsname, Name der Trainerin/des Trainers,
+        Jahrgang und Jugendkategorie der Mannschaft, Jahrgangs-Ausrichtung (älterer/jüngerer Jahrgang
+        der Altersklasse), selbst eingeschätzte Spielstärke, E-Mail-Adresse und Telefonnummer der
+        Kontaktperson sowie optional einen Notfallkontakt für den Turniertag.
+      </p>
 
       <strong>3. Zweck und Rechtsgrundlage</strong>
       <p>
@@ -1391,8 +1396,7 @@ function TeilnahmebedingungenText() {
       <strong>4. Absage oder Abbruch des Turniers</strong>
       <p>
         Muss das Turnier aus wichtigem Grund (z. B. Unwetter, behördliche Anordnung) abgesagt oder
-        abgebrochen werden, wird [Rückerstattungsregelung einsetzen, z. B.: die Startgebühr anteilig
-        zurückerstattet / ein Gutschein für ein Ersatztermin ausgestellt].
+        abgebrochen werden, wird die bereits gezahlte Startgebühr vollständig zurückerstattet.
       </p>
 
       <strong>5. Bild- und Tonaufnahmen</strong>
@@ -1974,6 +1978,7 @@ const SPONSOR_BUDGET_OPTIONEN = [
 
 function SponsorAnsicht() {
   const [form, setForm] = useState({ firma: "", ansprechpartner: "", email: "", telefon: "", budget: "", nachricht: "" });
+  const [wirdGesendet, setWirdGesendet] = useState(false);
   const feld = (name) => (e) => setForm({ ...form, [name]: e.target.value });
 
   const gueltig = form.firma.trim() && form.ansprechpartner.trim() && form.email.trim();
@@ -1992,6 +1997,32 @@ function SponsorAnsicht() {
     form.nachricht ? "Nachricht:" : null,
     form.nachricht || null,
   ].filter((zeile) => zeile !== null).join("\n");
+
+  // Speichert die Anfrage zusätzlich in der Datenbank, damit nichts verloren geht,
+  // selbst wenn die WhatsApp-Nachricht später übersehen oder gelöscht wird.
+  // Schlägt das Speichern fehl, wird der Sponsor trotzdem zu WhatsApp weitergeleitet -
+  // die Kontaktaufnahme soll daran nicht scheitern.
+  const kontaktAufnehmen = async (e) => {
+    e.preventDefault();
+    if (!gueltig || wirdGesendet) return;
+    setWirdGesendet(true);
+    try {
+      await supabaseInsert("sponsoren", {
+        id: neueId("sponsor"),
+        firma: form.firma.trim(),
+        ansprechpartner: form.ansprechpartner.trim(),
+        email: form.email.trim(),
+        telefon: form.telefon.trim() || null,
+        budget: form.budget || null,
+        nachricht: form.nachricht.trim() || null,
+      });
+    } catch (e) {
+      console.warn("Sponsor-Anfrage konnte nicht gespeichert werden:", e.message);
+    } finally {
+      setWirdGesendet(false);
+      window.open(whatsappLink(VERANSTALTER.telefon, whatsappNachricht), "_blank");
+    }
+  };
 
   return (
     <div>
@@ -2045,20 +2076,9 @@ function SponsorAnsicht() {
 
         <p className="kc-notiz">* Pflichtangabe</p>
 
-        {gueltig ? (
-          <a
-            className="kc-btn kc-btn--primary"
-            href={whatsappLink(VERANSTALTER.telefon, whatsappNachricht)}
-            target="_blank"
-            rel="noopener"
-          >
-            📱 Jetzt per WhatsApp Kontakt aufnehmen
-          </a>
-        ) : (
-          <button className="kc-btn kc-btn--primary" type="button" disabled>
-            📱 Jetzt per WhatsApp Kontakt aufnehmen
-          </button>
-        )}
+        <button className="kc-btn kc-btn--primary" type="button" disabled={!gueltig || wirdGesendet} onClick={kontaktAufnehmen}>
+          📱 Jetzt per WhatsApp Kontakt aufnehmen
+        </button>
         <p className="kc-notiz">
           Beim Klick öffnet sich WhatsApp mit einer vorausgefüllten Nachricht an {VERANSTALTER.name} –
           ihr müsst dort nur noch auf „Senden" tippen.
@@ -2085,6 +2105,9 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
   const [zeigeAdminsVerwalten, setZeigeAdminsVerwalten] = useState(false);
   const [zeigeDatenschutzTools, setZeigeDatenschutzTools] = useState(false);
   const [zeigeDokumenteVerwalten, setZeigeDokumenteVerwalten] = useState(false);
+  const [zeigeSponsorAnfragen, setZeigeSponsorAnfragen] = useState(false);
+  const [sponsorAnfragen, setSponsorAnfragen] = useState([]);
+  const [sponsorAnfragenLaedt, setSponsorAnfragenLaedt] = useState(false);
   const [offenerSpielplanTurnier, setOffenerSpielplanTurnier] = useState(null);
 
   const nachLoginProfilLaden = async (neueSession) => {
@@ -2423,6 +2446,29 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     }
   };
 
+  const sponsorAnfragenLaden = async () => {
+    setSponsorAnfragenLaedt(true);
+    try {
+      const zeilen = await supabaseSelect("sponsoren", "?select=*&order=erstellt_am.desc", session.access_token);
+      setSponsorAnfragen(zeilen);
+    } catch (e) {
+      alert("Sponsor-Anfragen konnten nicht geladen werden: " + e.message);
+    } finally {
+      setSponsorAnfragenLaedt(false);
+    }
+  };
+
+  const sponsorAnfrageMarkieren = async (id, bearbeitet) => {
+    const zeile = await supabaseUpdate("sponsoren", id, { bearbeitet }, session.access_token);
+    setSponsorAnfragen((prev) => prev.map((s) => (s.id === id ? zeile[0] : s)));
+  };
+
+  const sponsorAnfrageLoeschen = async (id) => {
+    if (!confirm("Diese Sponsor-Anfrage wirklich löschen?")) return;
+    await supabaseDelete("sponsoren", id, session.access_token);
+    setSponsorAnfragen((prev) => prev.filter((s) => s.id !== id));
+  };
+
   if (offenerSpielplanTurnier) {
     const plan = spielplaene.find((p) => p.turnierId === offenerSpielplanTurnier.id) || null;
     return (
@@ -2460,6 +2506,16 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
             </button>
             <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => setZeigeDokumenteVerwalten((v) => !v)}>
               Dokumente
+            </button>
+            <button
+              className="kc-btn kc-btn--sekundaer kc-btn--klein"
+              onClick={() => {
+                const neuerStatus = !zeigeSponsorAnfragen;
+                setZeigeSponsorAnfragen(neuerStatus);
+                if (neuerStatus) sponsorAnfragenLaden();
+              }}
+            >
+              Sponsor-Anfragen
             </button>
             <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={alleExportieren} disabled={anmeldungen.length === 0}>
               Alle als CSV exportieren
@@ -2516,6 +2572,16 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
           onHochladen={dokumentHochladen}
           onLoeschen={dokumentLoeschen}
           onSchliessen={() => setZeigeDokumenteVerwalten(false)}
+        />
+      )}
+
+      {zeigeSponsorAnfragen && (
+        <SponsorAnfragenVerwalten
+          anfragen={sponsorAnfragen}
+          laedt={sponsorAnfragenLaedt}
+          onMarkieren={sponsorAnfrageMarkieren}
+          onLoeschen={sponsorAnfrageLoeschen}
+          onSchliessen={() => setZeigeSponsorAnfragen(false)}
         />
       )}
 
@@ -2995,6 +3061,58 @@ function DokumenteVerwalten({ turniere, dokumente, onHochladen, onLoeschen, onSc
           </div>
         ))}
       </div>
+
+      <div className="kc-admin-aktionen" style={{ marginTop: "14px" }}>
+        <button className="kc-btn kc-btn--sekundaer" onClick={onSchliessen}>Schließen</button>
+      </div>
+    </div>
+  );
+}
+
+function SponsorAnfragenVerwalten({ anfragen, laedt, onMarkieren, onLoeschen, onSchliessen }) {
+  return (
+    <div className="kc-section kc-formular-karte">
+      <h2 className="kc-h2">Sponsor-Anfragen</h2>
+      <p className="kc-sub">
+        Wird automatisch gespeichert, sobald jemand im Sponsoring-Formular auf den WhatsApp-Button
+        tippt - unabhängig davon, ob die WhatsApp-Nachricht tatsächlich abgeschickt wurde.
+      </p>
+
+      {laedt ? (
+        <p className="kc-notiz">Lädt …</p>
+      ) : anfragen.length === 0 ? (
+        <p className="kc-notiz">Noch keine Sponsor-Anfragen eingegangen.</p>
+      ) : (
+        <div className="kc-anmeldungs-tabelle">
+          {anfragen.map((s) => (
+            <div className="kc-anmeldungs-zeile" key={s.id} style={s.bearbeitet ? { opacity: 0.6 } : undefined}>
+              <div>
+                <strong>{s.firma}</strong> · {s.ansprechpartner}
+                <div className="kc-notiz">{s.email}{s.telefon ? ` · ${s.telefon}` : ""}</div>
+                {s.budget && <div className="kc-notiz">Budget: {s.budget}</div>}
+                {s.nachricht && <div className="kc-notiz">„{s.nachricht}"</div>}
+                <div className="kc-notiz">Eingegangen: {formatDatumZeit(new Date(s.erstellt_am).getTime())}</div>
+                {s.bearbeitet && <div className="kc-notiz" style={{ color: "var(--kc-green)", fontWeight: 600 }}>✓ Erledigt</div>}
+              </div>
+              <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+                <a
+                  className="kc-btn kc-btn--sekundaer kc-btn--klein"
+                  href={whatsappLink(s.telefon || "", `Hallo ${s.ansprechpartner}, vielen Dank für euer Interesse an einem Sponsoring bei ${VERANSTALTER.name}!`)}
+                  target="_blank"
+                  rel="noopener"
+                  style={!s.telefon ? { pointerEvents: "none", opacity: 0.5 } : undefined}
+                >
+                  📱 WhatsApp
+                </a>
+                <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => onMarkieren(s.id, !s.bearbeitet)}>
+                  {s.bearbeitet ? "Als offen markieren" : "Als erledigt markieren"}
+                </button>
+                <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => onLoeschen(s.id)}>Löschen</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="kc-admin-aktionen" style={{ marginTop: "14px" }}>
         <button className="kc-btn kc-btn--sekundaer" onClick={onSchliessen}>Schließen</button>
