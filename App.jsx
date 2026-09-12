@@ -901,7 +901,7 @@ export default function App() {
             📱 Fragen? Per WhatsApp kontaktieren
           </a>
         </div>
-        <div className="kc-footer-ersteller">App erstellt von HaYuTech</div>
+        <div className="kc-footer-ersteller">App erstellt von HaYuTech · kontakt@hayutech.de</div>
       </footer>
     </div>
   );
