@@ -39,6 +39,12 @@ function formatDatum(iso) {
   }
 }
 
+// Datum + optionale Turnier-Uhrzeit zu einer Zeile kombinieren, z. B. "12. Oktober 2026, 09:00 Uhr"
+function formatTermin(turnier) {
+  const datumText = formatDatum(turnier.datum);
+  return turnier.uhrzeit ? `${datumText}, ${turnier.uhrzeit} Uhr` : datumText;
+}
+
 function formatDatumZeit(ts) {
   if (!ts) return "–";
   return new Intl.DateTimeFormat("de-DE", {
@@ -171,7 +177,7 @@ function whatsappLink(telefon, nachricht) {
 
 function mailVorlage(typ, anmeldung, turnier) {
   const frist = anmeldung.frist ? formatDatumZeit(anmeldung.frist) : "";
-  const termin = turnier ? `${formatDatum(turnier.datum)} in ${turnier.ort}` : "";
+  const termin = turnier ? `${formatTermin(turnier)} in ${turnier.ort}` : "";
   const gruss = `Sportliche Grüße\nDein KIDZCUP-Team`;
 
   if (typ === "angenommen") {
@@ -765,10 +771,16 @@ function turnierAusDb(t) {
     id: t.id, name: t.name, datum: t.datum, ort: t.ort,
     maxPlaetze: t.max_plaetze, preis: Number(t.preis), zahlLink: t.zahl_link,
     erstelltAm: t.erstellt_am ? new Date(t.erstellt_am).getTime() : Date.now(),
+    beschreibung: t.beschreibung || "",
+    uhrzeit: t.uhrzeit || "",
+    logoPfad: t.logo_pfad || null,
   };
 }
 function turnierZuDb(t) {
-  return { id: t.id, name: t.name, datum: t.datum, ort: t.ort, max_plaetze: t.maxPlaetze, preis: t.preis, zahl_link: t.zahlLink || null };
+  return {
+    id: t.id, name: t.name, datum: t.datum, ort: t.ort, max_plaetze: t.maxPlaetze, preis: t.preis, zahl_link: t.zahlLink || null,
+    beschreibung: t.beschreibung || null, uhrzeit: t.uhrzeit || null, logo_pfad: t.logoPfad || null,
+  };
 }
 
 function anmeldungAusDb(a) {
@@ -1165,17 +1177,23 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
           return (
             <div className="kc-karte" key={t.id} style={{ borderLeftColor: frei === 0 ? "var(--kc-gold)" : "var(--kc-green)" }}>
               <div className="kc-karte__kopf">
-                <h2 className="kc-karte__titel">{t.name}</h2>
+                {t.logoPfad && (
+                  <img className="kc-turnier-logo" src={dateiOeffentlicheUrl(t.logoPfad)} alt={`Logo ${t.name}`} />
+                )}
+                <div className="kc-karte__kopf-text">
+                  <h2 className="kc-karte__titel">{t.name}</h2>
+                </div>
                 <div className="kc-karte__zahl">
                   <span className="kc-zahl-gross">{frei}</span>
                   <span className="kc-zahl-label">Plätze frei</span>
                 </div>
               </div>
               <dl className="kc-details">
-                <div><dt>Termin</dt><dd>{formatDatum(t.datum)}</dd></div>
+                <div><dt>Termin</dt><dd>{formatTermin(t)}</dd></div>
                 <div><dt>Ort</dt><dd>{t.ort}</dd></div>
                 <div><dt>Gebühr</dt><dd>{t.preis} €</dd></div>
               </dl>
+              {t.beschreibung && <p className="kc-turnier-beschreibung">{t.beschreibung}</p>}
               <button className="kc-btn kc-btn--primary" onClick={() => setAusgewaehlt(t)}>
                 {frei === 0 ? "Auf Warteliste anmelden" : "Jetzt anmelden"}
               </button>
@@ -1379,10 +1397,14 @@ function AnmeldeFormular({ turnier, belegtePlaetze, pruefeDuplikat, jetzt, onAbb
   return (
     <div className="kc-section">
       <button className="kc-zurueck" onClick={onAbbrechen}>← Zurück zur Turnierliste</button>
+      {turnier.logoPfad && (
+        <img className="kc-turnier-logo kc-turnier-logo--gross" src={dateiOeffentlicheUrl(turnier.logoPfad)} alt={`Logo ${turnier.name}`} />
+      )}
       <h1 className="kc-h1">Anmeldung: {turnier.name}</h1>
       <p className="kc-sub">
-        {formatDatum(turnier.datum)} · {turnier.ort} · {turnier.preis} € Startgebühr · noch {frei} Plätze frei
+        {formatTermin(turnier)} · {turnier.ort} · {turnier.preis} € Startgebühr · noch {frei} Plätze frei
       </p>
+      {turnier.beschreibung && <p className="kc-turnier-beschreibung">{turnier.beschreibung}</p>}
 
       {frei === 0 && (
         <div className="kc-hinweis kc-hinweis--warteliste">
@@ -1493,7 +1515,7 @@ function AnmeldeStatusKarte({ anmeldung, turnier, jetzt, alsBezahltMelden, fotoE
       <div className="kc-status-karte">
         <span className="kc-status-badge" style={{ background: STATUS_FARBE[status] }}>{STATUS_LABEL[status]}</span>
         <h1 className="kc-h1">{turnier ? turnier.name : "Turnier"}</h1>
-        <p className="kc-sub">{turnier ? `${formatDatum(turnier.datum)} · ${turnier.ort}` : ""}</p>
+        <p className="kc-sub">{turnier ? `${formatTermin(turnier)} · ${turnier.ort}` : ""}</p>
 
         <dl className="kc-details">
           <div><dt>Verein</dt><dd>{anmeldung.verein}</dd></div>
@@ -1983,15 +2005,44 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
   };
 
   const neuesTurnierAnlegen = async (daten) => {
-    const roh = { id: neueId("turnier"), ...daten, erstelltAm: Date.now() };
+    const { logoDatei, logoEntfernen, ...restDaten } = daten;
+    const roh = { id: neueId("turnier"), ...restDaten, erstelltAm: Date.now() };
     const zeile = await supabaseInsert("turniere", turnierZuDb(roh), session.access_token);
-    setTurniere((prev) => [...prev, turnierAusDb(zeile[0])]);
+    let neuesTurnier = turnierAusDb(zeile[0]);
+    if (logoDatei) {
+      try {
+        const endung = logoDatei.name.includes(".") ? logoDatei.name.slice(logoDatei.name.lastIndexOf(".")) : "";
+        const pfad = `logos/${roh.id}-${Date.now()}${endung}`;
+        await supabaseDateiHochladen(pfad, logoDatei, session.access_token);
+        const aktualisiert = await supabaseUpdate("turniere", roh.id, { logo_pfad: pfad }, session.access_token);
+        neuesTurnier = turnierAusDb(aktualisiert[0]);
+      } catch (e) {
+        alert("Turnier wurde gespeichert, aber das Logo konnte nicht hochgeladen werden: " + e.message);
+      }
+    }
+    setTurniere((prev) => [...prev, neuesTurnier]);
     setZeigeFormular(false);
   };
 
   const turnierAktualisieren = async (daten) => {
     const id = bearbeitetesTurnier.id;
-    const zeile = await supabaseUpdate("turniere", id, turnierZuDb({ id, ...daten }), session.access_token);
+    const { logoDatei, logoEntfernen, ...restDaten } = daten;
+    let logoPfad = bearbeitetesTurnier.logoPfad || null;
+    try {
+      if (logoEntfernen && logoPfad) {
+        await supabaseDateiLoeschen(logoPfad, session.access_token);
+        logoPfad = null;
+      }
+      if (logoDatei) {
+        if (logoPfad) await supabaseDateiLoeschen(logoPfad, session.access_token);
+        const endung = logoDatei.name.includes(".") ? logoDatei.name.slice(logoDatei.name.lastIndexOf(".")) : "";
+        logoPfad = `logos/${id}-${Date.now()}${endung}`;
+        await supabaseDateiHochladen(logoPfad, logoDatei, session.access_token);
+      }
+    } catch (e) {
+      alert("Hinweis: Logo-Änderung konnte nicht vollständig gespeichert werden: " + e.message);
+    }
+    const zeile = await supabaseUpdate("turniere", id, turnierZuDb({ id, ...restDaten, logoPfad }), session.access_token);
     setTurniere((prev) => prev.map((t) => (t.id === id ? turnierAusDb(zeile[0]) : t)));
     setBearbeitetesTurnier(null);
     setZeigeFormular(false);
@@ -2755,15 +2806,28 @@ function TurnierFormular({ bestehendesTurnier, onAbsenden, onAbbrechen }) {
       ? {
           name: bestehendesTurnier.name,
           datum: bestehendesTurnier.datum,
+          uhrzeit: bestehendesTurnier.uhrzeit || "",
           ort: bestehendesTurnier.ort,
           maxPlaetze: String(bestehendesTurnier.maxPlaetze),
           preis: String(bestehendesTurnier.preis),
           zahlLink: bestehendesTurnier.zahlLink || "",
+          beschreibung: bestehendesTurnier.beschreibung || "",
         }
-      : { name: "", datum: "", ort: "", maxPlaetze: "16", preis: "25", zahlLink: "" }
+      : { name: "", datum: "", uhrzeit: "", ort: "", maxPlaetze: "16", preis: "25", zahlLink: "", beschreibung: "" }
   );
+  const [logoDatei, setLogoDatei] = useState(null);
+  const [logoVorschau, setLogoVorschau] = useState(null);
+  const [logoEntfernen, setLogoEntfernen] = useState(false);
   const feld = (name) => (e) => setForm({ ...form, [name]: e.target.value });
   const gueltig = form.name.trim() && form.datum && form.ort.trim() && Number(form.maxPlaetze) > 0 && Number(form.preis) >= 0;
+
+  const logoAuswaehlen = (e) => {
+    const datei = e.target.files[0];
+    if (!datei) return;
+    setLogoDatei(datei);
+    setLogoEntfernen(false);
+    setLogoVorschau(URL.createObjectURL(datei));
+  };
 
   return (
     <div className="kc-section kc-formular-karte">
@@ -2773,7 +2837,7 @@ function TurnierFormular({ bestehendesTurnier, onAbsenden, onAbbrechen }) {
         onSubmit={(e) => {
           e.preventDefault();
           if (!gueltig) return;
-          onAbsenden({ ...form, maxPlaetze: Number(form.maxPlaetze), preis: Number(form.preis) });
+          onAbsenden({ ...form, maxPlaetze: Number(form.maxPlaetze), preis: Number(form.preis), logoDatei, logoEntfernen });
         }}
       >
         <label className="kc-feld">
@@ -2786,10 +2850,14 @@ function TurnierFormular({ bestehendesTurnier, onAbsenden, onAbbrechen }) {
             <input className="kc-input" type="date" value={form.datum} onChange={feld("datum")} required />
           </label>
           <label className="kc-feld">
-            <span>Ort</span>
-            <input className="kc-input" value={form.ort} onChange={feld("ort")} required />
+            <span>Uhrzeit (optional)</span>
+            <input className="kc-input" type="time" value={form.uhrzeit} onChange={feld("uhrzeit")} />
           </label>
         </div>
+        <label className="kc-feld">
+          <span>Ort</span>
+          <input className="kc-input" value={form.ort} onChange={feld("ort")} required />
+        </label>
         <div className="kc-feld-reihe">
           <label className="kc-feld">
             <span>Max. Plätze</span>
@@ -2803,6 +2871,35 @@ function TurnierFormular({ bestehendesTurnier, onAbsenden, onAbbrechen }) {
         <label className="kc-feld">
           <span>Zahlungslink (z. B. PayPal.me oder Stripe Payment Link)</span>
           <input className="kc-input" type="url" value={form.zahlLink} onChange={feld("zahlLink")} placeholder="https://" />
+        </label>
+        <label className="kc-feld">
+          <span>Beschreibung (optional, für Vereine bei der Anmeldung sichtbar)</span>
+          <textarea
+            className="kc-input kc-textarea"
+            value={form.beschreibung}
+            onChange={feld("beschreibung")}
+            rows={4}
+            placeholder="z. B. Ablauf, Spielmodus, Hallenregeln, Verpflegung …"
+          />
+        </label>
+        <label className="kc-feld">
+          <span>Logo (optional, für Vereine bei der Anmeldung sichtbar)</span>
+          {(logoVorschau || (bestehendesTurnier?.logoPfad && !logoEntfernen)) && (
+            <div className="kc-logo-vorschau">
+              <img
+                src={logoVorschau || dateiOeffentlicheUrl(bestehendesTurnier.logoPfad)}
+                alt="Logo-Vorschau"
+              />
+              <button
+                type="button"
+                className="kc-btn kc-btn--gefahr kc-btn--klein"
+                onClick={() => { setLogoDatei(null); setLogoVorschau(null); setLogoEntfernen(true); }}
+              >
+                Logo entfernen
+              </button>
+            </div>
+          )}
+          <input className="kc-input" type="file" accept="image/*" onChange={logoAuswaehlen} />
         </label>
         <div className="kc-admin-aktionen">
           <button className="kc-btn kc-btn--primary" type="submit" disabled={!gueltig}>
@@ -2889,6 +2986,11 @@ const CSS = `
   box-shadow: 0 1px 3px rgba(22,48,32,0.08);
 }
 .kc-karte__kopf { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.kc-karte__kopf-text { flex: 1; min-width: 0; }
+.kc-turnier-logo { width: 44px; height: 44px; object-fit: contain; border-radius: 8px; background: white; padding: 3px; flex-shrink: 0; border: 1px solid #E4E8E2; }
+.kc-turnier-logo--gross { width: 84px; height: 84px; display: block; margin-bottom: 10px; }
+.kc-turnier-beschreibung { font-size: 13.5px; line-height: 1.6; color: var(--kc-text); background: #F8FAF7; border-radius: 8px; padding: 10px 12px; margin: 10px 0; white-space: pre-wrap; }
+.kc-textarea { resize: vertical; font-family: inherit; }
 .kc-karte__titel { font-family: -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 19px; font-weight: 700; margin: 0; color: var(--kc-pitch); }
 .kc-karte__zahl { text-align: right; flex-shrink: 0; }
 .kc-zahl-gross { display: block; font-family: -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 26px; font-weight: 800; color: var(--kc-pitch); line-height: 1; }
