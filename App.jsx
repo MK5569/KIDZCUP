@@ -7,6 +7,14 @@ const LOGO_SRC = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAkACQAAD/4QECRXhpZgA
 // ---------- Hilfsfunktionen ----------
 
 const DREI_TAGE_MS = 3 * 24 * 60 * 60 * 1000;
+const EINEN_TAG_MS = 24 * 60 * 60 * 1000;
+
+// Turniere verschwinden aus der Vereins-Ansicht einen Tag nach dem Turniertermin
+// (bleiben im Admin-Bereich aber weiterhin sichtbar, z. B. für CSV-Export/Archiv).
+function turnierFuerTeilnehmerSichtbar(turnier, jetzt) {
+  const sichtbarBis = new Date(turnier.datum).getTime() + 2 * EINEN_TAG_MS;
+  return jetzt < sichtbarBis;
+}
 
 function neueId(prefix) {
   return prefix + "_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
@@ -436,6 +444,73 @@ function spielplanAlsPdfHerunterladen(plan, teams, turnier) {
   doc.save(`spielplan-${turnier.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.pdf`);
 }
 
+// Erstellt clientseitig einen einfachen Zahlungsbeleg als PDF. Das ist eine Bestätigung/
+// Quittung für die eigenen Unterlagen des Vereins - kein formales Rechnungsdokument mit
+// USt-Pflichtangaben (falls sowas gebraucht wird, ist das ein separates Thema).
+function zahlungsBelegHerunterladen(anmeldung, turnier) {
+  const doc = new jsPDF();
+  let y = 20;
+
+  doc.setFontSize(18);
+  doc.text("Zahlungsbestätigung", 14, y);
+  y += 12;
+
+  doc.setFontSize(10);
+  doc.setTextColor(90, 90, 90);
+  doc.text(`Ausgestellt am: ${formatDatum(new Date().toISOString())}`, 14, y);
+  y += 6;
+  doc.text(`Beleg-/Referenznummer: ${anmeldung.id}`, 14, y);
+  doc.setTextColor(0, 0, 0);
+  y += 12;
+
+  doc.setFontSize(11);
+  doc.text("Veranstalter", 14, y);
+  y += 6;
+  doc.setFontSize(9.5);
+  doc.text(VERANSTALTER.name, 14, y); y += 5;
+  doc.text(VERANSTALTER.anschrift, 14, y); y += 5;
+  doc.text(`${VERANSTALTER.email} · ${VERANSTALTER.telefon}`, 14, y);
+  y += 12;
+
+  doc.setFontSize(11);
+  doc.text("Turnier", 14, y);
+  y += 6;
+  doc.setFontSize(9.5);
+  doc.text(turnier.name, 14, y); y += 5;
+  doc.text(`${formatDatum(turnier.datum)} · ${turnier.ort}`, 14, y);
+  y += 12;
+
+  doc.setFontSize(11);
+  doc.text("Zahlungspflichtige Mannschaft", 14, y);
+  y += 6;
+  doc.setFontSize(9.5);
+  doc.text(`Verein: ${anmeldung.verein}`, 14, y); y += 5;
+  doc.text(`Trainer: ${anmeldung.trainer}`, 14, y); y += 5;
+  doc.text(`Jahrgang/Jugend: ${anmeldung.jahrgang} / ${anmeldung.jugend}`, 14, y);
+  y += 14;
+
+  doc.setDrawColor(200, 200, 200);
+  doc.line(14, y, 196, y);
+  y += 10;
+
+  doc.setFontSize(12);
+  doc.text("Startgebühr", 14, y);
+  doc.text(`${turnier.preis.toFixed(2)} €`, 160, y);
+  y += 10;
+
+  doc.setFontSize(10);
+  doc.setTextColor(30, 110, 60);
+  doc.text(`Status: Zahlung bestätigt${anmeldung.bestaetigtAm ? " am " + formatDatumZeit(anmeldung.bestaetigtAm) : ""}`, 14, y);
+  doc.setTextColor(0, 0, 0);
+  y += 14;
+
+  doc.setFontSize(8.5);
+  doc.setTextColor(120, 120, 120);
+  doc.text("Dies ist eine Zahlungsbestätigung für eure Unterlagen, kein formales Rechnungsdokument.", 14, y);
+
+  doc.save(`zahlungsbeleg-${anmeldung.verein.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.pdf`);
+}
+
 // ---------- Supabase-Anbindung ----------
 //
 // Statt der Claude-eigenen window.storage-Funktion nutzt die App jetzt eine echte,
@@ -610,6 +685,7 @@ function anmeldungAusDb(a) {
     status: a.status, zahlungsreferenz: a.zahlungsreferenz, fotoEinverstaendnis: a.foto_einverstaendnis,
     datenschutzAkzeptiertAm: a.datenschutz_akzeptiert_am, teilnahmebedingungenAkzeptiertAm: a.teilnahmebedingungen_akzeptiert_am,
     bearbeitetVon: a.bearbeitet_von,
+    bestaetigtAm: a.bestaetigt_am ? new Date(a.bestaetigt_am).getTime() : null,
   };
 }
 function anmeldungZuDb(a) {
@@ -776,8 +852,10 @@ function TeilnehmerAnsicht({ turniere, anmeldungen, setAnmeldungen, belegtePlaet
   }, [turniere.length]);
 
   const kommendeTurniere = useMemo(
-    () => [...turniere].sort((a, b) => new Date(a.datum) - new Date(b.datum)),
-    [turniere]
+    () => turniere
+      .filter((t) => turnierFuerTeilnehmerSichtbar(t, jetzt))
+      .sort((a, b) => new Date(a.datum) - new Date(b.datum)),
+    [turniere, jetzt]
   );
 
   const anmeldenBei = async (turnier, daten) => {
@@ -1318,7 +1396,14 @@ function AnmeldeStatusKarte({ anmeldung, turnier, jetzt, alsBezahltMelden, fotoE
           <p className="kc-hinweis">Danke! Deine Zahlung wird vom Veranstalter geprüft und in Kürze bestätigt.</p>
         )}
         {status === "bestaetigt" && (
-          <p className="kc-hinweis kc-hinweis--erfolg">Deine Teilnahme steht fest – wir freuen uns auf dich beim Turnier!</p>
+          <>
+            <p className="kc-hinweis kc-hinweis--erfolg">Deine Teilnahme steht fest – wir freuen uns auf dich beim Turnier!</p>
+            {turnier && (
+              <button className="kc-btn kc-btn--sekundaer" onClick={() => zahlungsBelegHerunterladen(anmeldung, turnier)}>
+                📄 Zahlungsbeleg herunterladen
+              </button>
+            )}
+          </>
         )}
         {status === "abgelaufen" && (
           <p className="kc-hinweis kc-hinweis--fehler">Die Zahlungsfrist ist abgelaufen. Die Teilnahme wurde leider nicht bestätigt.</p>
@@ -1706,11 +1791,9 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
 
   const anmeldungAktualisieren = async (anmeldungId, neuerStatus) => {
     const anmeldung = anmeldungen.find((a) => a.id === anmeldungId);
-    const zeile = await supabaseUpdate(
-      "anmeldungen", anmeldungId,
-      { status: neuerStatus, bearbeitet_von: adminProfil.name || "" },
-      session.access_token
-    );
+    const daten = { status: neuerStatus, bearbeitet_von: adminProfil.name || "" };
+    if (neuerStatus === "bestaetigt") daten.bestaetigt_am = new Date().toISOString();
+    const zeile = await supabaseUpdate("anmeldungen", anmeldungId, daten, session.access_token);
     const aktualisierteAnmeldung = anmeldungAusDb(zeile[0]);
     setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
     if (anmeldung) {
@@ -1812,9 +1895,19 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
 
   const dokumentLoeschen = async (dokument) => {
     if (!confirm(`"${dokument.titel}" wirklich löschen?`)) return;
-    await supabaseDateiLoeschen(dokument.pfad, session.access_token);
-    await supabaseDelete("dokumente", dokument.id, session.access_token);
-    setDokumente((prev) => prev.filter((d) => d.id !== dokument.id));
+    let dateiStatus = "ok";
+    try {
+      await supabaseDateiLoeschen(dokument.pfad, session.access_token);
+    } catch (e) {
+      dateiStatus = "Datei-Fehler: " + e.message;
+    }
+    try {
+      await supabaseDelete("dokumente", dokument.id, session.access_token);
+      setDokumente((prev) => prev.filter((d) => d.id !== dokument.id));
+      alert("Gelöscht. (Datei-Speicher: " + dateiStatus + ")");
+    } catch (e) {
+      alert("Datenbank-Eintrag konnte nicht gelöscht werden: " + e.message + " (Datei-Speicher: " + dateiStatus + ")");
+    }
   };
 
   if (offenerSpielplanTurnier) {
