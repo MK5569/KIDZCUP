@@ -784,7 +784,7 @@ function dokumentZuDb(d) {
 export default function App() {
   const [ansicht, setAnsicht] = useState("teilnehmer");
   const [turniere, setTurniere] = useState([]);
-  const [anmeldungen, setAnmeldungen] = useState([]);
+  const [belegung, setBelegung] = useState({}); // { [turnierId]: anzahl } - KEINE Kontaktdaten, nur Zählwerte
   const [spielplaene, setSpielplaene] = useState([]);
   const [dokumente, setDokumente] = useState([]);
   const [geladen, setGeladen] = useState(false);
@@ -803,25 +803,37 @@ export default function App() {
     }
   });
 
+  // Lädt nur die ZÄHLWERTE belegter Plätze, nicht die vollen Anmeldedaten - so bekommt
+  // die öffentliche Startseite nie Zugriff auf E-Mail/Telefon/Notfallkontakte anderer.
+  const belegungNeuLaden = useCallback(async () => {
+    try {
+      const zeilen = await supabaseRpc("oeffentliche_belegung_alle");
+      const map = {};
+      (zeilen || []).forEach((z) => { map[z.turnier_id] = z.belegt; });
+      setBelegung(map);
+    } catch (e) {
+      console.warn("Belegungszahlen konnten nicht geladen werden:", e.message);
+    }
+  }, []);
+
   const allesNeuLaden = useCallback(async () => {
     try {
-      const [t, a, s, d] = await Promise.all([
+      const [t, s, d] = await Promise.all([
         supabaseSelect("turniere", "?select=*&order=datum.asc"),
-        supabaseSelect("anmeldungen", "?select=*"),
         supabaseSelect("spielplaene", "?select=*"),
         supabaseSelect("dokumente", "?select=*&order=hochgeladen_am.desc"),
       ]);
       setTurniere(t.map(turnierAusDb));
-      setAnmeldungen(a.map(anmeldungAusDb));
       setSpielplaene(s.map(spielplanAusDb));
       setDokumente(d.map(dokumentAusDb));
+      await belegungNeuLaden();
       setLadeFehler("");
     } catch (e) {
       setLadeFehler("Daten konnten nicht geladen werden: " + e.message);
     } finally {
       setGeladen(true);
     }
-  }, []);
+  }, [belegungNeuLaden]);
 
   useEffect(() => { allesNeuLaden(); }, [allesNeuLaden]);
 
@@ -830,11 +842,7 @@ export default function App() {
     return () => clearInterval(iv);
   }, []);
 
-  const belegtePlaetze = useCallback((turnierId) => {
-    return anmeldungen.filter(
-      (a) => a.turnierId === turnierId && ["ausstehend", "zahlung_gemeldet", "bestaetigt"].includes(effektiverStatus(a, jetzt))
-    ).length;
-  }, [anmeldungen, jetzt]);
+  const belegtePlaetze = useCallback((turnierId) => belegung[turnierId] || 0, [belegung]);
 
   if (!geladen) {
     return (
@@ -865,9 +873,8 @@ export default function App() {
         {ansicht === "teilnehmer" ? (
           <TeilnehmerAnsicht
             turniere={turniere}
-            anmeldungen={anmeldungen}
-            setAnmeldungen={setAnmeldungen}
             belegtePlaetze={belegtePlaetze}
+            belegungNeuLaden={belegungNeuLaden}
             spielplaene={spielplaene}
             dokumente={dokumente}
             deepLink={deepLink}
@@ -877,15 +884,13 @@ export default function App() {
           <AdminAnsicht
             turniere={turniere}
             setTurniere={setTurniere}
-            anmeldungen={anmeldungen}
-            setAnmeldungen={setAnmeldungen}
             spielplaene={spielplaene}
             setSpielplaene={setSpielplaene}
             dokumente={dokumente}
             setDokumente={setDokumente}
-            belegtePlaetze={belegtePlaetze}
             jetzt={jetzt}
             neuLaden={allesNeuLaden}
+            belegungNeuLaden={belegungNeuLaden}
           />
         )}
       </main>
@@ -909,13 +914,14 @@ export default function App() {
 
 // ---------- Teilnehmer-Ansicht ----------
 
-function TeilnehmerAnsicht({ turniere, anmeldungen, setAnmeldungen, belegtePlaetze, spielplaene, dokumente, deepLink, jetzt }) {
+function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielplaene, dokumente, deepLink, jetzt }) {
   const [ausgewaehlt, setAusgewaehlt] = useState(null);
   const [neueAnmeldung, setNeueAnmeldung] = useState(null); // frisch angelegte Anmeldung dieser Sitzung
   const [codeSuche, setCodeSuche] = useState("");
   const [gefundeneAnmeldung, setGefundeneAnmeldung] = useState(null);
   const [suchFehler, setSuchFehler] = useState("");
   const [angezeigterSpielplan, setAngezeigterSpielplan] = useState(null); // Turnier, dessen Plan gerade angezeigt wird
+  const [spielplanTeams, setSpielplanTeams] = useState([]); // nur {id, verein} der bestätigten Teams - keine Kontaktdaten
   const [angezeigteDokumenteFuer, setAngezeigteDokumenteFuer] = useState(null); // Turnier-Objekt oder "allgemein"
   const [wirdGespeichert, setWirdGespeichert] = useState(false);
 
@@ -927,12 +933,34 @@ function TeilnehmerAnsicht({ turniere, anmeldungen, setAnmeldungen, belegtePlaet
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [turniere.length]);
 
+  // Sobald ein Spielplan angezeigt wird, nur die Vereinsnamen der bestätigten Teams laden
+  // (keine E-Mail/Telefon - die braucht die öffentliche Ansicht nicht).
+  useEffect(() => {
+    if (!angezeigterSpielplan) { setSpielplanTeams([]); return; }
+    (async () => {
+      try {
+        const teams = await supabaseRpc("oeffentliche_teams_fuer_turnier", { p_turnier_id: angezeigterSpielplan.id });
+        setSpielplanTeams(teams || []);
+      } catch {
+        setSpielplanTeams([]);
+      }
+    })();
+  }, [angezeigterSpielplan]);
+
   const kommendeTurniere = useMemo(
     () => turniere
       .filter((t) => turnierFuerTeilnehmerSichtbar(t, jetzt))
       .sort((a, b) => new Date(a.datum) - new Date(b.datum)),
     [turniere, jetzt]
   );
+
+  const pruefeDuplikat = async (turnierId, verein, jugend) => {
+    try {
+      return await supabaseRpc("oeffentliche_duplikat_pruefung", { p_turnier_id: turnierId, p_verein: verein, p_jugend: jugend });
+    } catch {
+      return false; // im Zweifel nicht blockieren - der Server prüft beim Speichern ohnehin nicht doppelt
+    }
+  };
 
   const anmeldenBei = async (turnier, daten) => {
     setWirdGespeichert(true);
@@ -950,9 +978,9 @@ function TeilnehmerAnsicht({ turniere, anmeldungen, setAnmeldungen, belegtePlaet
       };
       const gespeichert = await supabaseRpc("oeffentliche_anmeldung_erstellen", { p_daten: anmeldungZuDb(neu) });
       const anmeldung = anmeldungAusDb(gespeichert);
-      setAnmeldungen((prev) => [...prev, anmeldung]);
       setNeueAnmeldung(anmeldung);
       setAusgewaehlt(null);
+      belegungNeuLaden();
       benachrichtigeBackend("neue_anmeldung", anmeldung, turnier); // informiert den Veranstalter per Mail, falls Backend eingerichtet ist
     } catch (e) {
       alert("Anmeldung konnte nicht gespeichert werden: " + e.message);
@@ -966,7 +994,6 @@ function TeilnehmerAnsicht({ turniere, anmeldungen, setAnmeldungen, belegtePlaet
       const ergebnis = await supabaseRpc("oeffentlich_als_bezahlt_melden", { p_code: anmeldungId, p_referenz: zahlungsreferenz || "" });
       if (!ergebnis) { alert("Diese Anmeldung konnte nicht aktualisiert werden (evtl. Status bereits geändert)."); return; }
       const aktualisierteAnmeldung = anmeldungAusDb(ergebnis);
-      setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
       if (neueAnmeldung && neueAnmeldung.id === anmeldungId) setNeueAnmeldung(aktualisierteAnmeldung);
       if (gefundeneAnmeldung && gefundeneAnmeldung.id === anmeldungId) setGefundeneAnmeldung(aktualisierteAnmeldung);
     } catch (e) {
@@ -979,7 +1006,6 @@ function TeilnehmerAnsicht({ turniere, anmeldungen, setAnmeldungen, belegtePlaet
     try {
       const ergebnis = await supabaseRpc("oeffentlich_foto_widerrufen", { p_code: anmeldungId });
       const aktualisierteAnmeldung = anmeldungAusDb(ergebnis);
-      setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
       if (neueAnmeldung && neueAnmeldung.id === anmeldungId) setNeueAnmeldung(aktualisierteAnmeldung);
       if (gefundeneAnmeldung && gefundeneAnmeldung.id === anmeldungId) setGefundeneAnmeldung(aktualisierteAnmeldung);
     } catch (e) {
@@ -992,10 +1018,10 @@ function TeilnehmerAnsicht({ turniere, anmeldungen, setAnmeldungen, belegtePlaet
   const anmeldungLoeschen = async (anmeldungId) => {
     try {
       await supabaseRpc("oeffentlich_anmeldung_loeschen", { p_code: anmeldungId });
-      setAnmeldungen((prev) => prev.filter((a) => a.id !== anmeldungId));
       setNeueAnmeldung(null);
       setGefundeneAnmeldung(null);
       setCodeSuche("");
+      belegungNeuLaden();
     } catch (e) {
       alert("Fehler beim Löschen: " + e.message);
     }
@@ -1054,7 +1080,7 @@ function TeilnehmerAnsicht({ turniere, anmeldungen, setAnmeldungen, belegtePlaet
       <AnmeldeFormular
         turnier={ausgewaehlt}
         belegtePlaetze={belegtePlaetze(ausgewaehlt.id)}
-        anmeldungen={anmeldungen}
+        pruefeDuplikat={pruefeDuplikat}
         jetzt={jetzt}
         onAbbrechen={() => setAusgewaehlt(null)}
         onAbsenden={(daten) => anmeldenBei(ausgewaehlt, daten)}
@@ -1069,7 +1095,7 @@ function TeilnehmerAnsicht({ turniere, anmeldungen, setAnmeldungen, belegtePlaet
         <button className="kc-zurueck" onClick={() => setAngezeigterSpielplan(null)}>← Zurück zur Turnierliste</button>
         <h1 className="kc-h1">Spielplan: {angezeigterSpielplan.name}</h1>
         {plan ? (
-          <SpielplanAnzeige plan={plan} teams={anmeldungen} turnier={angezeigterSpielplan} bearbeitbar={false} />
+          <SpielplanAnzeige plan={plan} teams={spielplanTeams} turnier={angezeigterSpielplan} bearbeitbar={false} />
         ) : (
           <p className="kc-sub">Für dieses Turnier wurde noch kein Spielplan erstellt.</p>
         )}
@@ -1277,7 +1303,7 @@ const JUGEND_KATEGORIEN = [
   "A1", "A2", "A3", "A4", "A5",
 ];
 
-function AnmeldeFormular({ turnier, belegtePlaetze, anmeldungen, jetzt, onAbbrechen, onAbsenden }) {
+function AnmeldeFormular({ turnier, belegtePlaetze, pruefeDuplikat, jetzt, onAbbrechen, onAbsenden }) {
   const [form, setForm] = useState({
     verein: "", trainer: "", jahrgang: "", jugend: "", email: "", telefon: "", notfallkontakt: "",
   });
@@ -1287,6 +1313,7 @@ function AnmeldeFormular({ turnier, belegtePlaetze, anmeldungen, jetzt, onAbbrec
   const [zeigeTeilnahmebedingungen, setZeigeTeilnahmebedingungen] = useState(false);
   const [fotoEinverstaendnis, setFotoEinverstaendnis] = useState(false);
   const [fehler, setFehler] = useState("");
+  const [wirdGeprueft, setWirdGeprueft] = useState(false);
   const frei = Math.max(0, turnier.maxPlaetze - belegtePlaetze);
 
   const feld = (name) => (e) => setForm({ ...form, [name]: e.target.value });
@@ -1295,28 +1322,26 @@ function AnmeldeFormular({ turnier, belegtePlaetze, anmeldungen, jetzt, onAbbrec
     form.verein.trim() && form.trainer.trim() && form.jahrgang.trim() && form.jugend.trim() &&
     form.email.trim() && form.telefon.trim() && datenschutzOk && teilnahmebedingungenOk;
 
-  const absenden = (e) => {
+  const absenden = async (e) => {
     e.preventDefault();
-    if (!gueltig) return;
-    const vereinNormiert = form.verein.trim().toLowerCase();
-    const jugendNormiert = form.jugend.trim().toLowerCase();
-    const duplikat = anmeldungen.find(
-      (a) => a.turnierId === turnier.id &&
-        a.verein.trim().toLowerCase() === vereinNormiert &&
-        (a.jugend || "").trim().toLowerCase() === jugendNormiert &&
-        !["abgelehnt", "abgelaufen"].includes(effektiverStatus(a, jetzt))
-    );
-    if (duplikat) {
-      setFehler(`"${form.verein}" (${form.jugend}) ist für dieses Turnier bereits angemeldet (Status: ${STATUS_LABEL[effektiverStatus(duplikat, jetzt)]}). Anmeldecode: ${duplikat.id}`);
-      return;
+    if (!gueltig || wirdGeprueft) return;
+    setWirdGeprueft(true);
+    try {
+      const bereitsAngemeldet = await pruefeDuplikat(turnier.id, form.verein.trim(), form.jugend.trim());
+      if (bereitsAngemeldet) {
+        setFehler(`"${form.verein}" (${form.jugend}) ist für dieses Turnier bereits angemeldet. Falls das ein Irrtum ist, wendet euch bitte an den Veranstalter.`);
+        return;
+      }
+      setFehler("");
+      onAbsenden({
+        ...form,
+        fotoEinverstaendnis,
+        datenschutzAkzeptiertAm: Date.now(),
+        teilnahmebedingungenAkzeptiertAm: Date.now(),
+      });
+    } finally {
+      setWirdGeprueft(false);
     }
-    setFehler("");
-    onAbsenden({
-      ...form,
-      fotoEinverstaendnis,
-      datenschutzAkzeptiertAm: Date.now(),
-      teilnahmebedingungenAkzeptiertAm: Date.now(),
-    });
   };
 
   return (
@@ -1409,8 +1434,8 @@ function AnmeldeFormular({ turnier, belegtePlaetze, anmeldungen, jetzt, onAbbrec
 
         <p className="kc-notiz">* Pflichtangabe</p>
 
-        <button className="kc-btn kc-btn--primary" type="submit" disabled={!gueltig}>
-          {frei > 0 ? "Verbindlich anmelden" : "Auf Warteliste anmelden"}
+        <button className="kc-btn kc-btn--primary" type="submit" disabled={!gueltig || wirdGeprueft}>
+          {wirdGeprueft ? "Wird geprüft …" : frei > 0 ? "Verbindlich anmelden" : "Auf Warteliste anmelden"}
         </button>
       </form>
     </div>
@@ -1788,12 +1813,14 @@ function monateSeitDatum(datumIso) {
   return (jetzt.getFullYear() - dann.getFullYear()) * 12 + (jetzt.getMonth() - dann.getMonth());
 }
 
-function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spielplaene, setSpielplaene, dokumente, setDokumente, belegtePlaetze, jetzt }) {
+function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, dokumente, setDokumente, jetzt, belegungNeuLaden }) {
   const [session, setSession] = useState(null); // { access_token, user }
   const [sitzungWirdGeprueft, setSitzungWirdGeprueft] = useState(true);
   const [adminProfil, setAdminProfil] = useState(null); // Zeile aus admin_profile: { user_id, name, email, erstellt_am }
   const [admins, setAdmins] = useState([]); // alle admin_profile-Einträge, für "Admins verwalten"
   const [profilLaedt, setProfilLaedt] = useState(false);
+  const [anmeldungen, setAnmeldungen] = useState([]); // volle Anmeldedaten - nur nach Admin-Login geladen
+  const [anmeldungenLaedt, setAnmeldungenLaedt] = useState(true);
 
   const [zeigeFormular, setZeigeFormular] = useState(false);
   const [bearbeitetesTurnier, setBearbeitetesTurnier] = useState(null);
@@ -1844,6 +1871,24 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Die vollen Anmeldedaten (inkl. E-Mail/Telefon) werden bewusst erst HIER geladen, mit dem
+  // eigenen Admin-Zugangstoken - nicht mehr zentral beim Start der App für alle Besucher.
+  useEffect(() => {
+    if (!session || !adminProfil) return;
+    (async () => {
+      setAnmeldungenLaedt(true);
+      try {
+        const zeilen = await supabaseSelect("anmeldungen", "?select=*", session.access_token);
+        setAnmeldungen(zeilen.map(anmeldungAusDb));
+      } catch (e) {
+        console.warn("Anmeldungen konnten nicht geladen werden:", e.message);
+      } finally {
+        setAnmeldungenLaedt(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session, adminProfil]);
+
   if (sitzungWirdGeprueft) {
     return <div className="kc-section">Lädt …</div>;
   }
@@ -1880,6 +1925,16 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
       />
     );
   }
+
+  if (anmeldungenLaedt) {
+    return <div className="kc-section">Lädt …</div>;
+  }
+
+  const belegtePlaetze = (turnierId) => {
+    return anmeldungen.filter(
+      (a) => a.turnierId === turnierId && ["ausstehend", "zahlung_gemeldet", "bestaetigt"].includes(effektiverStatus(a, jetzt))
+    ).length;
+  };
 
   const abmelden = async () => {
     await supabaseAbmelden(session.access_token);
@@ -1920,6 +1975,7 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
     const zeile = await supabaseUpdate("anmeldungen", anmeldungId, daten, session.access_token);
     const aktualisierteAnmeldung = anmeldungAusDb(zeile[0]);
     setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
+    belegungNeuLaden();
     if (anmeldung) {
       const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
       const typ = neuerStatus === "bestaetigt" ? "bestaetigung" : neuerStatus === "abgelehnt" ? "ablehnung" : null;
@@ -1940,6 +1996,7 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
     );
     const aktualisierteAnmeldung = anmeldungAusDb(zeile[0]);
     setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
+    belegungNeuLaden();
     if (anmeldung) {
       const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
       benachrichtigeBackend("warteliste_aufnahme", aktualisierteAnmeldung, turnier);
@@ -1967,6 +2024,7 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
     if (!confirm(`Anmeldung von "${anmeldung.verein}" (${anmeldung.jugend}) wirklich endgültig löschen?`)) return;
     await supabaseDelete("anmeldungen", anmeldung.id, session.access_token);
     setAnmeldungen((prev) => prev.filter((a) => a.id !== anmeldung.id));
+    belegungNeuLaden();
   };
 
   // Löschkonzept: personenbezogene Anmeldedaten zu Turnieren, die lange zurückliegen, bereinigen.
@@ -1977,6 +2035,7 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
     await supabaseDeleteWhere("spielplaene", `?turnier_id=eq.${turnier.id}`, session.access_token);
     setAnmeldungen((prev) => prev.filter((a) => a.turnierId !== turnier.id));
     setSpielplaene((prev) => prev.filter((p) => p.turnierId !== turnier.id));
+    belegungNeuLaden();
   };
 
   const spielplanErstellen = async (turnier, modus, anzahlGruppen) => {
