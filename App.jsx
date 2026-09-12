@@ -102,7 +102,7 @@ function csvEscape(feld) {
 
 function anmeldungenAlsCsv(liste, turniere, jetzt) {
   const kopf = [
-    "Turnier", "Verein", "Trainer", "Jahrgang", "Jugend", "E-Mail", "Telefon", "Notfallkontakt",
+    "Turnier", "Verein", "Trainer", "Jahrgang", "Jugend", "Jahrgangs-Ausrichtung", "Spielstärke", "E-Mail", "Telefon", "Notfallkontakt",
     "Status", "Angemeldet am", "Zahlungsfrist", "Zahlungsreferenz", "Gebührenfrei", "Foto-/Videoeinverständnis", "Bearbeitet von",
   ];
   const zeilen = liste.map((a) => {
@@ -110,7 +110,10 @@ function anmeldungenAlsCsv(liste, turniere, jetzt) {
     const st = effektiverStatus(a, jetzt);
     return [
       t ? t.name : "",
-      a.verein, a.trainer, a.jahrgang, a.jugend, a.email, a.telefon, a.notfallkontakt || "",
+      a.verein, a.trainer, a.jahrgang, a.jugend,
+      a.jahrgangTyp === "alt" ? "Älterer Jahrgang" : a.jahrgangTyp === "jung" ? "Jüngerer Jahrgang" : "",
+      a.spielstaerke ? `${a.spielstaerke.charAt(0).toUpperCase()}${a.spielstaerke.slice(1)}` : "",
+      a.email, a.telefon, a.notfallkontakt || "",
       STATUS_LABEL[st] || st,
       formatDatumZeit(a.angemeldetAm),
       a.frist ? formatDatumZeit(a.frist) : "–",
@@ -794,6 +797,8 @@ function anmeldungAusDb(a) {
     bearbeitetVon: a.bearbeitet_von,
     bestaetigtAm: a.bestaetigt_am ? new Date(a.bestaetigt_am).getTime() : null,
     gebuehrenfrei: !!a.gebuehrenfrei,
+    spielstaerke: a.spielstaerke || "",
+    jahrgangTyp: a.jahrgang_typ || "",
   };
 }
 function anmeldungZuDb(a) {
@@ -802,6 +807,7 @@ function anmeldungZuDb(a) {
     email: a.email, telefon: a.telefon, notfallkontakt: a.notfallkontakt || null,
     frist: a.frist ? new Date(a.frist).toISOString() : null,
     status: a.status, foto_einverstaendnis: !!a.fotoEinverstaendnis,
+    spielstaerke: a.spielstaerke || null, jahrgang_typ: a.jahrgangTyp || null,
   };
 }
 
@@ -1413,6 +1419,7 @@ const JUGEND_KATEGORIEN = [
 function AnmeldeFormular({ turnier, belegtePlaetze, pruefeDuplikat, jetzt, onAbbrechen, onAbsenden }) {
   const [form, setForm] = useState({
     verein: "", trainer: "", jahrgang: "", jugend: "", email: "", telefon: "", notfallkontakt: "",
+    spielstaerke: "", jahrgangTyp: "",
   });
   const [datenschutzOk, setDatenschutzOk] = useState(false);
   const [zeigeDatenschutz, setZeigeDatenschutz] = useState(false);
@@ -1427,7 +1434,7 @@ function AnmeldeFormular({ turnier, belegtePlaetze, pruefeDuplikat, jetzt, onAbb
 
   const gueltig =
     form.verein.trim() && form.trainer.trim() && form.jahrgang.trim() && form.jugend.trim() &&
-    form.email.trim() && form.telefon.trim() && datenschutzOk && teilnahmebedingungenOk;
+    form.email.trim() && form.telefon.trim() && form.spielstaerke && form.jahrgangTyp && datenschutzOk && teilnahmebedingungenOk;
 
   const absenden = async (e) => {
     e.preventDefault();
@@ -1490,6 +1497,25 @@ function AnmeldeFormular({ turnier, belegtePlaetze, pruefeDuplikat, jetzt, onAbb
               {JUGEND_KATEGORIEN.map((k) => (
                 <option key={k} value={k}>{k}</option>
               ))}
+            </select>
+          </label>
+        </div>
+        <div className="kc-feld-reihe">
+          <label className="kc-feld">
+            <span>Jahrgangs-Ausrichtung</span>
+            <select className="kc-input" value={form.jahrgangTyp} onChange={feld("jahrgangTyp")} required>
+              <option value="" disabled>Bitte wählen…</option>
+              <option value="alt">Älterer Jahrgang der Altersklasse</option>
+              <option value="jung">Jüngerer Jahrgang der Altersklasse</option>
+            </select>
+          </label>
+          <label className="kc-feld">
+            <span>Spielstärke der Mannschaft</span>
+            <select className="kc-input" value={form.spielstaerke} onChange={feld("spielstaerke")} required>
+              <option value="" disabled>Bitte wählen…</option>
+              <option value="stark">Stark</option>
+              <option value="mittel">Mittel</option>
+              <option value="schwach">Schwach</option>
             </select>
           </label>
         </div>
@@ -2558,6 +2584,13 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                         <div>
                           <strong>{a.verein}</strong> – Jahrgang {a.jahrgang} ({a.jugend}) · Trainer: {a.trainer}
                           <div className="kc-notiz">{a.email} · {a.telefon}</div>
+                          {(a.spielstaerke || a.jahrgangTyp) && (
+                            <div className="kc-notiz">
+                              {a.jahrgangTyp && (a.jahrgangTyp === "alt" ? "Älterer Jahrgang" : "Jüngerer Jahrgang")}
+                              {a.spielstaerke && a.jahrgangTyp && " · "}
+                              {a.spielstaerke && `Spielstärke: ${a.spielstaerke.charAt(0).toUpperCase()}${a.spielstaerke.slice(1)}`}
+                            </div>
+                          )}
                           {a.notfallkontakt && <div className="kc-notiz">Notfallkontakt: {a.notfallkontakt}</div>}
                           <div className="kc-notiz">Frist: {formatDatumZeit(a.frist)}</div>
                           {a.zahlungsreferenz && <div className="kc-notiz">Referenz: {a.zahlungsreferenz}</div>}
