@@ -156,6 +156,16 @@ const VERANSTALTER = {
   vertreter: "Recep Aksoy",
 };
 
+// Vorbelegung für neue Turniere - bleibt pro Turnier änderbar, falls sich mal was ändert.
+const STANDARD_IBAN = "DE33500240243247423401";
+const STANDARD_KONTOINHABER = "Recep Aksoy";
+
+// Fügt Leerzeichen alle 4 Zeichen ein, damit die IBAN wie gewohnt lesbar dargestellt wird.
+function formatIban(iban) {
+  if (!iban) return "";
+  return iban.replace(/\s+/g, "").replace(/(.{4})/g, "$1 ").trim();
+}
+
 // ---------- E-Mail-Benachrichtigungen ----------
 //
 // Ohne eigenen Server kann eine Web-App keine E-Mails im Hintergrund verschicken (ein API-Schlüssel
@@ -858,12 +868,15 @@ function turnierAusDb(t) {
     beschreibung: t.beschreibung || "",
     uhrzeit: t.uhrzeit || "",
     logoPfad: t.logo_pfad || null,
+    iban: t.iban || "",
+    kontoinhaber: t.kontoinhaber || "",
   };
 }
 function turnierZuDb(t) {
   return {
     id: t.id, name: t.name, datum: t.datum, ort: t.ort, max_plaetze: t.maxPlaetze, preis: t.preis, zahl_link: t.zahlLink || null,
     beschreibung: t.beschreibung || null, uhrzeit: t.uhrzeit || null, logo_pfad: t.logoPfad || null,
+    iban: t.iban || null, kontoinhaber: t.kontoinhaber || null,
   };
 }
 
@@ -1703,15 +1716,30 @@ function AnmeldeStatusKarte({ anmeldung, turnier, jetzt, alsBezahltMelden, fotoE
           )}
         </dl>
 
-        {status === "ausstehend" && turnier && turnier.zahlLink && (
+        {status === "ausstehend" && turnier && (turnier.zahlLink || turnier.iban) && (
           <div className="kc-zahl-block">
-            <a className="kc-btn kc-btn--primary" href={normalisiereLink(turnier.zahlLink)} target="_blank" rel="noopener">
-              Startgebühr jetzt bezahlen ({turnier.preis} €)
-            </a>
-            <div className="kc-app-tipp">
-              💡 Öffnet sich eine App (z. B. PayPal) und findet euer Profil nicht? Link kurz gedrückt halten →
-              „Im Browser öffnen" wählen.
-            </div>
+            {turnier.zahlLink && (
+              <>
+                <a className="kc-btn kc-btn--primary" href={normalisiereLink(turnier.zahlLink)} target="_blank" rel="noopener">
+                  Startgebühr jetzt bezahlen ({turnier.preis} €)
+                </a>
+                <div className="kc-app-tipp">
+                  💡 Öffnet sich eine App (z. B. PayPal) und findet euer Profil nicht? Link kurz gedrückt halten →
+                  „Im Browser öffnen" wählen.
+                </div>
+              </>
+            )}
+            {turnier.iban && (
+              <div className="kc-bank-info">
+                <strong>Alternativ per Überweisung zahlen:</strong>
+                <div className="kc-bank-info__zeile"><span>IBAN</span><span>{formatIban(turnier.iban)}</span></div>
+                {turnier.kontoinhaber && (
+                  <div className="kc-bank-info__zeile"><span>Kontoinhaber</span><span>{turnier.kontoinhaber}</span></div>
+                )}
+                <div className="kc-bank-info__zeile"><span>Betrag</span><span>{turnier.preis} €</span></div>
+                <div className="kc-bank-info__zeile"><span>Verwendungszweck</span><span>{anmeldung.verein} – {turnier.name}</span></div>
+              </div>
+            )}
             <div className="kc-zahlreferenz-zeile">
               <input
                 className="kc-input"
@@ -3226,8 +3254,13 @@ function TurnierFormular({ bestehendesTurnier, onAbsenden, onAbbrechen }) {
           preis: String(bestehendesTurnier.preis),
           zahlLink: bestehendesTurnier.zahlLink || "",
           beschreibung: bestehendesTurnier.beschreibung || "",
+          iban: bestehendesTurnier.iban || "",
+          kontoinhaber: bestehendesTurnier.kontoinhaber || "",
         }
-      : { name: "", datum: "", uhrzeit: "", ort: "", maxPlaetze: "16", preis: "25", zahlLink: "", beschreibung: "" }
+      : {
+          name: "", datum: "", uhrzeit: "", ort: "", maxPlaetze: "16", preis: "25", zahlLink: "", beschreibung: "",
+          iban: STANDARD_IBAN, kontoinhaber: STANDARD_KONTOINHABER,
+        }
   );
   const [logoDatei, setLogoDatei] = useState(null);
   const [logoVorschau, setLogoVorschau] = useState(null);
@@ -3286,6 +3319,16 @@ function TurnierFormular({ bestehendesTurnier, onAbsenden, onAbbrechen }) {
           <span>Zahlungslink (z. B. PayPal.me oder Stripe Payment Link)</span>
           <input className="kc-input" type="url" value={form.zahlLink} onChange={feld("zahlLink")} placeholder="https://" />
         </label>
+        <div className="kc-feld-reihe">
+          <label className="kc-feld">
+            <span>IBAN für Überweisung (optional, alternative Zahlungsart)</span>
+            <input className="kc-input" value={form.iban} onChange={feld("iban")} placeholder="z. B. DE33 5002 4024 3247 4234 01" />
+          </label>
+          <label className="kc-feld">
+            <span>Kontoinhaber</span>
+            <input className="kc-input" value={form.kontoinhaber} onChange={feld("kontoinhaber")} />
+          </label>
+        </div>
         <label className="kc-feld">
           <span>Beschreibung (optional, für Vereine bei der Anmeldung sichtbar)</span>
           <textarea
@@ -3467,6 +3510,19 @@ const CSS = `
   line-height: 1.5;
   margin: 4px 0 0;
 }
+
+.kc-bank-info {
+  background: #F2F4F1;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 10px 0 0;
+  font-size: 13.5px;
+}
+.kc-bank-info strong { display: block; margin-bottom: 6px; color: var(--kc-pitch); }
+.kc-bank-info__zeile { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; border-bottom: 1px dashed #D7DED6; }
+.kc-bank-info__zeile:last-child { border-bottom: none; }
+.kc-bank-info__zeile span:first-child { color: var(--kc-muted); flex-shrink: 0; }
+.kc-bank-info__zeile span:last-child { font-weight: 600; text-align: right; }
 
 .kc-datenschutz { display: flex; flex-direction: column; gap: 8px; }
 .kc-checkbox-zeile { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; font-weight: 400; color: var(--kc-text); }
