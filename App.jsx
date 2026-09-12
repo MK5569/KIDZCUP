@@ -575,6 +575,79 @@ function zahlungsBelegHerunterladen(anmeldung, turnier) {
   doc.save(`zahlungsbeleg-${anmeldung.verein.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.pdf`);
 }
 
+// Erstellt clientseitig eine PDF-Teilnehmerliste für die eigenen Unterlagen des Veranstalters
+// (z. B. nach dem Turnier lokal zu archivieren). Enthält bewusst mehr Details als die öffentliche
+// Mannschaftsliste, da dies eine reine Admin-Funktion ist (Kontaktdaten inklusive).
+function teilnehmerlisteAlsPdfHerunterladen(turnier, anmeldungen, jetzt) {
+  const liste = [...anmeldungen].sort((a, b) => {
+    if (a.jugend !== b.jugend) return (a.jugend || "").localeCompare(b.jugend || "");
+    return (a.verein || "").localeCompare(b.verein || "");
+  });
+
+  const doc = new jsPDF();
+  const seitenHoehe = doc.internal.pageSize.getHeight();
+  let y = 18;
+
+  const neueZeilePruefen = (hoehe = 7) => {
+    if (y + hoehe > seitenHoehe - 15) {
+      doc.addPage();
+      y = 18;
+    }
+  };
+
+  doc.setFontSize(16);
+  doc.text(`Teilnehmerliste: ${turnier.name}`, 14, y);
+  y += 7;
+  doc.setFontSize(10);
+  doc.setTextColor(90, 90, 90);
+  doc.text(`${formatTermin(turnier)} · ${turnier.ort}`, 14, y);
+  doc.setTextColor(0, 0, 0);
+  y += 6;
+  doc.setFontSize(8.5);
+  doc.setTextColor(120, 120, 120);
+  doc.text(`Erstellt am ${formatDatumZeit(Date.now())} · ${liste.length} Anmeldung(en)`, 14, y);
+  doc.setTextColor(0, 0, 0);
+  y += 10;
+
+  liste.forEach((a, i) => {
+    neueZeilePruefen(30);
+    const st = effektiverStatus(a, jetzt);
+
+    doc.setFontSize(11);
+    doc.setFont(undefined, "bold");
+    doc.text(`${i + 1}. ${a.verein}`, 14, y);
+    doc.setFont(undefined, "normal");
+    doc.setFontSize(9);
+    doc.text(STATUS_LABEL[st] || st, 160, y);
+    y += 5.5;
+
+    doc.setFontSize(9);
+    doc.text(`Jahrgang/Jugend: ${a.jahrgang} / ${a.jugend}${a.jahrgangTyp ? (a.jahrgangTyp === "alt" ? " (älterer Jahrgang)" : " (jüngerer Jahrgang)") : ""}`, 14, y);
+    y += 5;
+    if (a.spielstaerke) {
+      doc.text(`Spielstärke: ${a.spielstaerke.charAt(0).toUpperCase()}${a.spielstaerke.slice(1)}`, 14, y);
+      y += 5;
+    }
+    doc.text(`Trainer: ${a.trainer}`, 14, y);
+    y += 5;
+    doc.text(`Kontakt: ${a.email} · ${a.telefon}`, 14, y);
+    y += 5;
+    if (a.notfallkontakt) {
+      doc.text(`Notfallkontakt: ${a.notfallkontakt}`, 14, y);
+      y += 5;
+    }
+    if (a.gebuehrenfrei) {
+      doc.text("Gebührenfrei", 14, y);
+      y += 5;
+    }
+    y += 4;
+    doc.setDrawColor(220, 220, 220);
+    doc.line(14, y - 2, 196, y - 2);
+  });
+
+  doc.save(`teilnehmerliste-${turnier.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.pdf`);
+}
+
 // ---------- Supabase-Anbindung ----------
 //
 // Statt der Claude-eigenen window.storage-Funktion nutzt die App jetzt eine echte,
@@ -2640,6 +2713,13 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                   disabled={regsFuerTurnier.length === 0}
                 >
                   CSV exportieren
+                </button>
+                <button
+                  className="kc-btn kc-btn--sekundaer"
+                  onClick={() => teilnehmerlisteAlsPdfHerunterladen(t, regsFuerTurnier, jetzt)}
+                  disabled={regsFuerTurnier.length === 0}
+                >
+                  📄 Teilnehmerliste als PDF
                 </button>
                 <button className="kc-btn kc-btn--gefahr" onClick={() => turnierLoeschen(t.id)}>Löschen</button>
               </div>
