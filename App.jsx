@@ -70,6 +70,14 @@ function effektiverStatus(reg, jetzt) {
   return reg.status;
 }
 
+// Einheitliche Beschriftung der Jahrgangs-Ausrichtung, an allen Anzeigestellen verwendet.
+function jahrgangTypLabel(typ) {
+  if (typ === "alt") return "Älterer Jahrgang";
+  if (typ === "jung") return "Jüngerer Jahrgang";
+  if (typ === "gemischt") return "Gemischt (älterer & jüngerer Jahrgang)";
+  return "";
+}
+
 const STATUS_LABEL = {
   eingegangen: "Anmeldung eingegangen – wird geprüft",
   ausstehend: "Zahlung ausstehend",
@@ -111,7 +119,7 @@ function anmeldungenAlsCsv(liste, turniere, jetzt) {
     return [
       t ? t.name : "",
       a.verein, a.trainer, a.jahrgang, a.jugend,
-      a.jahrgangTyp === "alt" ? "Älterer Jahrgang" : a.jahrgangTyp === "jung" ? "Jüngerer Jahrgang" : "",
+      jahrgangTypLabel(a.jahrgangTyp),
       a.spielstaerke ? `${a.spielstaerke.charAt(0).toUpperCase()}${a.spielstaerke.slice(1)}` : "",
       a.email, a.telefon, a.notfallkontakt || "",
       STATUS_LABEL[st] || st,
@@ -622,7 +630,7 @@ function teilnehmerlisteAlsPdfHerunterladen(turnier, anmeldungen, jetzt) {
     y += 5.5;
 
     doc.setFontSize(9);
-    doc.text(`Jahrgang/Jugend: ${a.jahrgang} / ${a.jugend}${a.jahrgangTyp ? (a.jahrgangTyp === "alt" ? " (älterer Jahrgang)" : " (jüngerer Jahrgang)") : ""}`, 14, y);
+    doc.text(`Jahrgang/Jugend: ${a.jahrgang} / ${a.jugend}${a.jahrgangTyp ? " (" + jahrgangTypLabel(a.jahrgangTyp) + ")" : ""}`, 14, y);
     y += 5;
     if (a.spielstaerke) {
       doc.text(`Spielstärke: ${a.spielstaerke.charAt(0).toUpperCase()}${a.spielstaerke.slice(1)}`, 14, y);
@@ -1588,6 +1596,7 @@ function AnmeldeFormular({ turnier, belegtePlaetze, pruefeDuplikat, jetzt, onAbb
               <option value="" disabled>Bitte wählen…</option>
               <option value="alt">Älterer Jahrgang der Altersklasse</option>
               <option value="jung">Jüngerer Jahrgang der Altersklasse</option>
+              <option value="gemischt">Gemischt (älterer &amp; jüngerer Jahrgang)</option>
             </select>
           </label>
           <label className="kc-feld">
@@ -2736,7 +2745,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                           <div className="kc-notiz">{a.email} · {a.telefon}</div>
                           {(a.spielstaerke || a.jahrgangTyp) && (
                             <div className="kc-notiz">
-                              {a.jahrgangTyp && (a.jahrgangTyp === "alt" ? "Älterer Jahrgang" : "Jüngerer Jahrgang")}
+                              {a.jahrgangTyp && jahrgangTypLabel(a.jahrgangTyp)}
                               {a.spielstaerke && a.jahrgangTyp && " · "}
                               {a.spielstaerke && `Spielstärke: ${a.spielstaerke.charAt(0).toUpperCase()}${a.spielstaerke.slice(1)}`}
                             </div>
