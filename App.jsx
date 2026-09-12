@@ -241,9 +241,9 @@ function mailOeffnen(typ, anmeldung, turnier) {
 // Schlägt der Aufruf fehl (z. B. weil keine URL gesetzt ist oder kein Netzwerkzugriff besteht),
 // wird das bewusst nur geloggt – die App bleibt auch ohne Backend voll funktionsfähig.
 async function benachrichtigeBackend(ereignis, anmeldung, turnier) {
-  if (!E_MAIL_WEBHOOK_URL) return;
+  if (!E_MAIL_WEBHOOK_URL) return false;
   try {
-    await fetch(E_MAIL_WEBHOOK_URL, {
+    const res = await fetch(E_MAIL_WEBHOOK_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -251,8 +251,20 @@ async function benachrichtigeBackend(ereignis, anmeldung, turnier) {
       },
       body: JSON.stringify({ ereignis, anmeldung, turnier }),
     });
+    return res.ok;
   } catch (e) {
     console.warn("E-Mail-Backend nicht erreichbar, mailto-Fallback wird verwendet.", e);
+    return false;
+  }
+}
+
+// Zentrale Stelle: Ist der Server eingerichtet und erreichbar, verschickt er die Mail automatisch
+// im Hintergrund - der Admin muss nichts mehr tun. Nur falls der Server (noch) nicht läuft oder
+// gerade nicht erreichbar ist, springt wie bisher das Mail-Programm als Fallback ein.
+async function benachrichtigen(typ, anmeldung, turnier) {
+  const automatischVersendet = await benachrichtigeBackend(typ, anmeldung, turnier);
+  if (!automatischVersendet) {
+    mailOeffnen(typ, anmeldung, turnier);
   }
 }
 
@@ -2008,8 +2020,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     belegungNeuLaden();
     if (anmeldung) {
       const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
-      benachrichtigeBackend("angenommen", aktualisierteAnmeldung, turnier);
-      mailOeffnen("angenommen", aktualisierteAnmeldung, turnier);
+      benachrichtigen("angenommen", aktualisierteAnmeldung, turnier);
     }
   };
 
@@ -2039,8 +2050,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     belegungNeuLaden();
     if (anmeldung) {
       const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
-      benachrichtigeBackend("bestaetigung", aktualisierteAnmeldung, turnier);
-      mailOeffnen("bestaetigung", aktualisierteAnmeldung, turnier);
+      benachrichtigen("bestaetigung", aktualisierteAnmeldung, turnier);
     }
   };
 
@@ -2056,8 +2066,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
       const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
       const typ = neuerStatus === "bestaetigt" ? "bestaetigung" : neuerStatus === "abgelehnt" ? "ablehnung" : null;
       if (typ) {
-        benachrichtigeBackend(typ, aktualisierteAnmeldung, turnier);
-        mailOeffnen(typ, aktualisierteAnmeldung, turnier);
+        benachrichtigen(typ, aktualisierteAnmeldung, turnier);
       }
     }
   };
@@ -2075,15 +2084,13 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     belegungNeuLaden();
     if (anmeldung) {
       const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
-      benachrichtigeBackend("warteliste_aufnahme", aktualisierteAnmeldung, turnier);
-      mailOeffnen("warteliste_aufnahme", aktualisierteAnmeldung, turnier);
+      benachrichtigen("warteliste_aufnahme", aktualisierteAnmeldung, turnier);
     }
   };
 
   const erinnerungSenden = (anmeldung) => {
     const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
-    benachrichtigeBackend("erinnerung", anmeldung, turnier);
-    mailOeffnen("erinnerung", anmeldung, turnier);
+    benachrichtigen("erinnerung", anmeldung, turnier);
   };
 
   const alleExportieren = () => {
