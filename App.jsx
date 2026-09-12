@@ -972,6 +972,8 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
   const [angezeigterSpielplan, setAngezeigterSpielplan] = useState(null); // Turnier, dessen Plan gerade angezeigt wird
   const [spielplanTeams, setSpielplanTeams] = useState([]); // nur {id, verein} der bestätigten Teams - keine Kontaktdaten
   const [angezeigteDokumenteFuer, setAngezeigteDokumenteFuer] = useState(null); // Turnier-Objekt oder "allgemein"
+  const [angezeigteMannschaftenFuer, setAngezeigteMannschaftenFuer] = useState(null); // Turnier, dessen angemeldete Teams angezeigt werden
+  const [mannschaftenListe, setMannschaftenListe] = useState([]); // nur {verein, jugend} - keine Kontaktdaten
   const [wirdGespeichert, setWirdGespeichert] = useState(false);
 
   // Deep-Link per QR-Code: direkt den Spielplan eines bestimmten Turniers öffnen
@@ -995,6 +997,20 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
       }
     })();
   }, [angezeigterSpielplan]);
+
+  // Sobald die Liste angemeldeter Mannschaften angezeigt wird, nur Vereinsname + Jugend laden
+  // (keine E-Mail/Telefon - die braucht die öffentliche Ansicht nicht).
+  useEffect(() => {
+    if (!angezeigteMannschaftenFuer) { setMannschaftenListe([]); return; }
+    (async () => {
+      try {
+        const teams = await supabaseRpc("oeffentliche_angemeldete_teams", { p_turnier_id: angezeigteMannschaftenFuer.id });
+        setMannschaftenListe(teams || []);
+      } catch {
+        setMannschaftenListe([]);
+      }
+    })();
+  }, [angezeigteMannschaftenFuer]);
 
   const kommendeTurniere = useMemo(
     () => turniere
@@ -1164,6 +1180,37 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
     );
   }
 
+  if (angezeigteMannschaftenFuer) {
+    // Nach Jugend gruppieren, damit die Liste übersichtlich bleibt
+    const gruppen = {};
+    mannschaftenListe.forEach((m) => {
+      const schluessel = m.jugend || "Ohne Angabe";
+      if (!gruppen[schluessel]) gruppen[schluessel] = [];
+      gruppen[schluessel].push(m.verein);
+    });
+    const jugendSchluessel = Object.keys(gruppen).sort();
+    return (
+      <div className="kc-section">
+        <button className="kc-zurueck" onClick={() => setAngezeigteMannschaftenFuer(null)}>← Zurück</button>
+        <h1 className="kc-h1">Angemeldete Mannschaften: {angezeigteMannschaftenFuer.name}</h1>
+        {mannschaftenListe.length === 0 ? (
+          <p className="kc-sub">Noch keine Mannschaft angemeldet.</p>
+        ) : (
+          jugendSchluessel.map((jugend) => (
+            <div key={jugend} className="kc-mannschaften-gruppe">
+              <h3 className="kc-h3">{jugend}</h3>
+              <ul className="kc-mannschaften-liste">
+                {gruppen[jugend].map((verein, i) => (
+                  <li key={verein + i}>{verein}</li>
+                ))}
+              </ul>
+            </div>
+          ))
+        )}
+      </div>
+    );
+  }
+
   return (
     <div>
       <section className="kc-section">
@@ -1202,6 +1249,11 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
               <button className="kc-btn kc-btn--primary" onClick={() => setAusgewaehlt(t)}>
                 {frei === 0 ? "Auf Warteliste anmelden" : "Jetzt anmelden"}
               </button>
+              {belegt > 0 && (
+                <button className="kc-btn kc-btn--sekundaer kc-btn--block" onClick={() => setAngezeigteMannschaftenFuer(t)}>
+                  Angemeldete Mannschaften ({belegt})
+                </button>
+              )}
               {spielplaene.some((p) => p.turnierId === t.id) && (
                 <button className="kc-btn kc-btn--sekundaer kc-btn--block" onClick={() => setAngezeigterSpielplan(t)}>
                   Spielplan ansehen
@@ -3210,6 +3262,9 @@ const CSS = `
 .kc-link-zeile .kc-input { font-size: 12px; }
 
 .kc-dokumente-liste { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
+.kc-mannschaften-gruppe { margin-bottom: 18px; }
+.kc-mannschaften-liste { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.kc-mannschaften-liste li { background: var(--kc-card); border-radius: 8px; padding: 10px 14px; font-size: 14px; box-shadow: 0 1px 3px rgba(22,48,32,0.06); }
 .kc-dokument-zeile { display: flex; align-items: center; gap: 12px; background: var(--kc-card); border-radius: 10px; padding: 12px 14px; box-shadow: 0 1px 3px rgba(22,48,32,0.08); text-decoration: none; color: inherit; }
 .kc-dokument-icon { font-size: 22px; flex-shrink: 0; }
 .kc-dokument-info { flex: 1; display: flex; flex-direction: column; gap: 2px; }
