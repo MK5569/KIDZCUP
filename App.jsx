@@ -152,6 +152,20 @@ function mailtoLink(empfaenger, betreff, text) {
   return `mailto:${empfaenger}?subject=${encodeURIComponent(betreff)}&body=${encodeURIComponent(text)}`;
 }
 
+// -- WhatsApp-Kontakt (funktioniert ohne eigenen Account/API, per "Click to Chat"-Link) --
+
+function waNummerNormalisieren(telefon) {
+  let n = (telefon || "").replace(/[^\d+]/g, "");
+  if (n.startsWith("+")) n = n.slice(1);
+  else if (n.startsWith("0")) n = "49" + n.slice(1); // deutsche Nummer: führende 0 -> Landesvorwahl 49
+  return n;
+}
+
+function whatsappLink(telefon, nachricht) {
+  const nummer = waNummerNormalisieren(telefon);
+  return `https://wa.me/${nummer}?text=${encodeURIComponent(nachricht)}`;
+}
+
 function mailVorlage(typ, anmeldung, turnier) {
   const frist = anmeldung.frist ? formatDatumZeit(anmeldung.frist) : "";
   const termin = turnier ? `${formatDatum(turnier.datum)} in ${turnier.ort}` : "";
@@ -836,7 +850,18 @@ export default function App() {
         )}
       </main>
 
-      <footer className="kc-footer">KIDZCUP · Football Tournament</footer>
+      <footer className="kc-footer">
+        KIDZCUP · Football Tournament
+        <div className="kc-footer-kontakt">
+          <a
+            href={whatsappLink(VERANSTALTER.telefon, "Hallo KIDZCUP-Team, ich habe eine Frage zur Turnieranmeldung.")}
+            target="_blank"
+            rel="noopener"
+          >
+            📱 Fragen? Per WhatsApp kontaktieren
+          </a>
+        </div>
+      </footer>
     </div>
   );
 }
@@ -887,6 +912,7 @@ function TeilnehmerAnsicht({ turniere, anmeldungen, setAnmeldungen, belegtePlaet
       setAnmeldungen((prev) => [...prev, anmeldung]);
       setNeueAnmeldung(anmeldung);
       setAusgewaehlt(null);
+      benachrichtigeBackend("neue_anmeldung", anmeldung, turnier); // informiert den Veranstalter per Mail, falls Backend eingerichtet ist
     } catch (e) {
       alert("Anmeldung konnte nicht gespeichert werden: " + e.message);
     } finally {
@@ -2117,6 +2143,14 @@ function AdminAnsicht({ turniere, setTurniere, anmeldungen, setAnmeldungen, spie
                           </div>
                         )}
                         <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+                          <a
+                            className="kc-btn kc-btn--sekundaer kc-btn--klein"
+                            href={whatsappLink(a.telefon, `Hallo ${a.trainer}, hier meldet sich KIDZCUP bezüglich eurer Anmeldung für "${turnier.name}".`)}
+                            target="_blank"
+                            rel="noopener"
+                          >
+                            📱 WhatsApp
+                          </a>
                           <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungManuellLoeschen(a)} title="Löschung auf Anfrage, z. B. bei Auskunftsersuchen">
                             🗑 Daten löschen
                           </button>
@@ -2610,6 +2644,8 @@ const CSS = `
 .kc-main { max-width: 720px; margin: 0 auto; padding: 24px 18px; }
 
 .kc-footer { text-align: center; color: var(--kc-muted); font-size: 12.5px; letter-spacing: 0.5px; padding: 20px 0 4px; }
+.kc-footer-kontakt { margin-top: 8px; }
+.kc-footer-kontakt a { color: var(--kc-green); font-weight: 600; text-decoration: none; font-size: 13px; letter-spacing: normal; }
 
 .kc-section { margin-bottom: 24px; }
 .kc-h1 { font-family: -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 28px; font-weight: 700; margin: 4px 0 6px; color: var(--kc-pitch); }
