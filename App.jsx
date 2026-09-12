@@ -3254,8 +3254,8 @@ function TurnierFormular({ bestehendesTurnier, onAbsenden, onAbbrechen }) {
           preis: String(bestehendesTurnier.preis),
           zahlLink: bestehendesTurnier.zahlLink || "",
           beschreibung: bestehendesTurnier.beschreibung || "",
-          iban: bestehendesTurnier.iban || "",
-          kontoinhaber: bestehendesTurnier.kontoinhaber || "",
+          iban: bestehendesTurnier.iban || STANDARD_IBAN,
+          kontoinhaber: bestehendesTurnier.kontoinhaber || STANDARD_KONTOINHABER,
         }
       : {
           name: "", datum: "", uhrzeit: "", ort: "", maxPlaetze: "16", preis: "25", zahlLink: "", beschreibung: "",
