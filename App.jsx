@@ -861,6 +861,7 @@ export default function App() {
             📱 Fragen? Per WhatsApp kontaktieren
           </a>
         </div>
+        <div className="kc-footer-ersteller">App erstellt von HaYuTech</div>
       </footer>
     </div>
   );
@@ -2646,6 +2647,7 @@ const CSS = `
 .kc-footer { text-align: center; color: var(--kc-muted); font-size: 12.5px; letter-spacing: 0.5px; padding: 20px 0 4px; }
 .kc-footer-kontakt { margin-top: 8px; }
 .kc-footer-kontakt a { color: var(--kc-green); font-weight: 600; text-decoration: none; font-size: 13px; letter-spacing: normal; }
+.kc-footer-ersteller { margin-top: 10px; font-size: 10.5px; color: #B7C0BC; letter-spacing: normal; }
 
 .kc-section { margin-bottom: 24px; }
 .kc-h1 { font-family: -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 28px; font-weight: 700; margin: 4px 0 6px; color: var(--kc-pitch); }
