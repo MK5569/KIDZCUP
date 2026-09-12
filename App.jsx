@@ -1450,13 +1450,6 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
 function DatenschutzText() {
   return (
     <div className="kc-datenschutz-text">
-      <p className="kc-ds-hinweis-box">
-        <strong>Hinweis für den Veranstalter:</strong> Dieser Text ist ein sorgfältig formulierter Entwurf auf Basis
-        der DSGVO-Informationspflichten (Art. 13 DSGVO), aber keine Rechtsberatung. Bitte die Platzhalter in
-        eckigen Klammern ausfüllen und den Text vor dem Livegang von einem Anwalt oder Datenschutzbeauftragten
-        prüfen lassen.
-      </p>
-
       <strong>1. Verantwortlicher</strong>
       <p>
         {VERANSTALTER.name}<br />
@@ -1518,13 +1511,6 @@ function DatenschutzText() {
 function TeilnahmebedingungenText() {
   return (
     <div className="kc-datenschutz-text">
-      <p className="kc-ds-hinweis-box">
-        <strong>Hinweis für den Veranstalter:</strong> Auch dies ist ein sorgfältig formulierter Entwurf,
-        keine Rechtsberatung. Insbesondere Haftungsausschlüsse sind rechtlich nur eingeschränkt wirksam
-        (z. B. nie bei Vorsatz oder grober Fahrlässigkeit, bei Personenschäden ohnehin nur sehr begrenzt) –
-        bitte vor dem Livegang von einem Anwalt prüfen und die Platzhalter ausfüllen lassen.
-      </p>
-
       <strong>1. Teilnahmeberechtigung</strong>
       <p>Mit der Anmeldung bestätigt die meldende Person, zur Anmeldung der genannten Mannschaft für den angegebenen Verein berechtigt zu sein.</p>
 
