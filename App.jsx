@@ -148,8 +148,8 @@ const VERANSTALTER = {
 
 // Wird gesetzt, sobald ein eigenes Backend (siehe kidzcup-email-backend/) deployt wurde.
 // Solange die URL leer ist, passiert hier nichts – die App funktioniert unverändert mit den mailto-Buttons.
-const E_MAIL_WEBHOOK_URL = "";
-const E_MAIL_WEBHOOK_SECRET = ""; // muss mit WEBHOOK_SECRET im Backend übereinstimmen, falls dort gesetzt
+const E_MAIL_WEBHOOK_URL = "https://kidzcup-email-backend.onrender.com/webhook";
+const E_MAIL_WEBHOOK_SECRET = "kidzcup-geheim-2026"; // muss mit WEBHOOK_SECRET im Backend übereinstimmen, falls dort gesetzt
 
 function mailtoLink(empfaenger, betreff, text) {
   return `mailto:${empfaenger}?subject=${encodeURIComponent(betreff)}&body=${encodeURIComponent(text)}`;
