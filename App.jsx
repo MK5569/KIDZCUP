@@ -1388,10 +1388,10 @@ function AnmeldeStatusKarte({ anmeldung, turnier, jetzt, alsBezahltMelden, fotoE
             <a className="kc-btn kc-btn--primary" href={normalisiereLink(turnier.zahlLink)} target="_blank" rel="noopener">
               Startgebühr jetzt bezahlen ({turnier.preis} €)
             </a>
-            <p className="kc-notiz">
-              Öffnet sich eine App (z. B. PayPal) und findet euer Profil nicht? Link kurz gedrückt halten →
+            <div className="kc-app-tipp">
+              💡 Öffnet sich eine App (z. B. PayPal) und findet euer Profil nicht? Link kurz gedrückt halten →
               „Im Browser öffnen" wählen.
-            </p>
+            </div>
             <div className="kc-zahlreferenz-zeile">
               <input
                 className="kc-input"
@@ -2668,6 +2668,17 @@ const CSS = `
 .kc-hinweis--erfolg { background: #E4F3EA; }
 .kc-hinweis--fehler { background: #FBE9E7; color: var(--kc-red); }
 .kc-hinweis--warteliste { background: #FCF3DC; color: #7A5A00; margin-bottom: 16px; }
+.kc-app-tipp {
+  background: #FCF3DC;
+  color: #7A5A00;
+  border: 1.5px solid #E0A100;
+  border-radius: 8px;
+  padding: 12px 14px;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.5;
+  margin: 4px 0 0;
+}
 
 .kc-datenschutz { display: flex; flex-direction: column; gap: 8px; }
 .kc-checkbox-zeile { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; font-weight: 400; color: var(--kc-text); }
