@@ -1268,13 +1268,13 @@ function TeilnahmebedingungenText() {
 // Übliche Jugend-/Altersklassen im deutschen Amateurfußball, inkl. gängiger 1er-/2er-Unterteilung.
 const JUGEND_KATEGORIEN = [
   "Bambini",
-  "G1", "G2",
-  "F1", "F2",
-  "E1", "E2",
-  "D1", "D2",
-  "C1", "C2",
-  "B1", "B2",
-  "A1", "A2",
+  "G1", "G2", "G3", "G4", "G5",
+  "F1", "F2", "F3", "F4", "F5",
+  "E1", "E2", "E3", "E4", "E5",
+  "D1", "D2", "D3", "D4", "D5",
+  "C1", "C2", "C3", "C4", "C5",
+  "B1", "B2", "B3", "B4", "B5",
+  "A1", "A2", "A3", "A4", "A5",
 ];
 
 function AnmeldeFormular({ turnier, belegtePlaetze, anmeldungen, jetzt, onAbbrechen, onAbsenden }) {
