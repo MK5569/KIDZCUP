@@ -870,6 +870,7 @@ function turnierAusDb(t) {
     logoPfad: t.logo_pfad || null,
     iban: t.iban || "",
     kontoinhaber: t.kontoinhaber || "",
+    zielgruppen: t.zielgruppen || [],
   };
 }
 function turnierZuDb(t) {
@@ -877,6 +878,7 @@ function turnierZuDb(t) {
     id: t.id, name: t.name, datum: t.datum, ort: t.ort, max_plaetze: t.maxPlaetze, preis: t.preis, zahl_link: t.zahlLink || null,
     beschreibung: t.beschreibung || null, uhrzeit: t.uhrzeit || null, logo_pfad: t.logoPfad || null,
     iban: t.iban || null, kontoinhaber: t.kontoinhaber || null,
+    zielgruppen: t.zielgruppen || [],
   };
 }
 
@@ -1119,6 +1121,24 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
     [turniere, jetzt]
   );
 
+  const [monatFilter, setMonatFilter] = useState("");
+  const [jugendFilter, setJugendFilter] = useState("");
+
+  // Welche Monate überhaupt vorkommen, damit der Filter nur relevante Monate anbietet.
+  const verfuegbareMonate = useMemo(() => {
+    const monate = new Set(kommendeTurniere.map((t) => new Date(t.datum).getMonth()));
+    return Array.from(monate).sort((a, b) => a - b);
+  }, [kommendeTurniere]);
+
+  const turniereGefiltert = useMemo(() => {
+    return kommendeTurniere.filter((t) => {
+      if (monatFilter !== "" && new Date(t.datum).getMonth() !== Number(monatFilter)) return false;
+      // Turniere ohne hinterlegte Zielgruppe gelten als "für alle Jugenden" und werden nie ausgeblendet.
+      if (jugendFilter !== "" && t.zielgruppen && t.zielgruppen.length > 0 && !t.zielgruppen.includes(jugendFilter)) return false;
+      return true;
+    });
+  }, [kommendeTurniere, monatFilter, jugendFilter]);
+
   const pruefeDuplikat = async (turnierId, verein, jugend) => {
     try {
       return await supabaseRpc("oeffentliche_duplikat_pruefung", { p_turnier_id: turnierId, p_verein: verein, p_jugend: jugend });
@@ -1318,12 +1338,44 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
         <p className="kc-sub">Freie Plätze, Termin und Ort auf einen Blick – Anmeldegebühr wird per Link bezahlt.</p>
       </section>
 
+      {kommendeTurniere.length > 0 && (
+        <section className="kc-section kc-filter-leiste">
+          <label className="kc-feld">
+            <span>Monat</span>
+            <select className="kc-input" value={monatFilter} onChange={(e) => setMonatFilter(e.target.value)}>
+              <option value="">Alle Monate</option>
+              {verfuegbareMonate.map((m) => (
+                <option key={m} value={m}>{MONATSNAMEN[m]}</option>
+              ))}
+            </select>
+          </label>
+          <label className="kc-feld">
+            <span>Jugend</span>
+            <select className="kc-input" value={jugendFilter} onChange={(e) => setJugendFilter(e.target.value)}>
+              <option value="">Alle Jugenden</option>
+              {JUGEND_GRUPPEN.map((g) => (
+                <option key={g.wert} value={g.wert}>{g.label}</option>
+              ))}
+            </select>
+          </label>
+          {(monatFilter !== "" || jugendFilter !== "") && (
+            <button className="kc-btn kc-btn--sekundaer kc-btn--klein kc-filter-zuruecksetzen" onClick={() => { setMonatFilter(""); setJugendFilter(""); }}>
+              Filter zurücksetzen
+            </button>
+          )}
+        </section>
+      )}
+
       {kommendeTurniere.length === 0 && (
         <div className="kc-empty">Aktuell sind keine Turniere ausgeschrieben. Schau bald wieder vorbei.</div>
       )}
 
+      {kommendeTurniere.length > 0 && turniereGefiltert.length === 0 && (
+        <div className="kc-empty">Kein Turnier passt zu den gewählten Filtern.</div>
+      )}
+
       <div className="kc-liste">
-        {kommendeTurniere.map((t) => {
+        {turniereGefiltert.map((t) => {
           const belegt = belegtePlaetze(t.id);
           const frei = Math.max(0, t.maxPlaetze - belegt);
           return (
@@ -1516,6 +1568,24 @@ const JUGEND_KATEGORIEN = [
   "C1", "C2", "C3", "C4", "C5",
   "B1", "B2", "B3", "B4", "B5",
   "A1", "A2", "A3", "A4", "A5",
+];
+
+// Grobe Gruppen für die Zielgruppen-Auswahl pro Turnier und den Jugend-Filter in der Turnierliste
+// (fasst z. B. G1-G5 zu "G-Jugend" zusammen, entspricht grob U7/U8 usw.).
+const JUGEND_GRUPPEN = [
+  { wert: "Bambini", label: "Bambini" },
+  { wert: "G", label: "G-Jugend" },
+  { wert: "F", label: "F-Jugend" },
+  { wert: "E", label: "E-Jugend" },
+  { wert: "D", label: "D-Jugend" },
+  { wert: "C", label: "C-Jugend" },
+  { wert: "B", label: "B-Jugend" },
+  { wert: "A", label: "A-Jugend" },
+];
+
+const MONATSNAMEN = [
+  "Januar", "Februar", "März", "April", "Mai", "Juni",
+  "Juli", "August", "September", "Oktober", "November", "Dezember",
 ];
 
 function AnmeldeFormular({ turnier, belegtePlaetze, pruefeDuplikat, jetzt, onAbbrechen, onAbsenden }) {
@@ -3265,8 +3335,13 @@ function TurnierFormular({ bestehendesTurnier, onAbsenden, onAbbrechen }) {
   const [logoDatei, setLogoDatei] = useState(null);
   const [logoVorschau, setLogoVorschau] = useState(null);
   const [logoEntfernen, setLogoEntfernen] = useState(false);
+  const [zielgruppen, setZielgruppen] = useState(bestehendesTurnier?.zielgruppen || []);
   const feld = (name) => (e) => setForm({ ...form, [name]: e.target.value });
   const gueltig = form.name.trim() && form.datum && form.ort.trim() && Number(form.maxPlaetze) > 0 && Number(form.preis) >= 0;
+
+  const zielgruppeUmschalten = (wert) => {
+    setZielgruppen((prev) => (prev.includes(wert) ? prev.filter((z) => z !== wert) : [...prev, wert]));
+  };
 
   const logoAuswaehlen = (e) => {
     const datei = e.target.files[0];
@@ -3284,7 +3359,7 @@ function TurnierFormular({ bestehendesTurnier, onAbsenden, onAbbrechen }) {
         onSubmit={(e) => {
           e.preventDefault();
           if (!gueltig) return;
-          onAbsenden({ ...form, maxPlaetze: Number(form.maxPlaetze), preis: Number(form.preis), logoDatei, logoEntfernen });
+          onAbsenden({ ...form, maxPlaetze: Number(form.maxPlaetze), preis: Number(form.preis), logoDatei, logoEntfernen, zielgruppen });
         }}
       >
         <label className="kc-feld">
@@ -3305,6 +3380,22 @@ function TurnierFormular({ bestehendesTurnier, onAbsenden, onAbbrechen }) {
           <span>Ort</span>
           <input className="kc-input" value={form.ort} onChange={feld("ort")} required />
         </label>
+        <div className="kc-feld">
+          <span>Für welche Jugend ist dieses Turnier? (optional, für den Jugend-Filter der Vereine)</span>
+          <div className="kc-zielgruppen-auswahl">
+            {JUGEND_GRUPPEN.map((g) => (
+              <label key={g.wert} className="kc-checkbox-chip">
+                <input
+                  type="checkbox"
+                  checked={zielgruppen.includes(g.wert)}
+                  onChange={() => zielgruppeUmschalten(g.wert)}
+                />
+                <span>{g.label}</span>
+              </label>
+            ))}
+          </div>
+          <p className="kc-notiz">Keine Auswahl = Turnier gilt für alle Jugenden und wird bei jedem Jugend-Filter angezeigt.</p>
+        </div>
         <div className="kc-feld-reihe">
           <label className="kc-feld">
             <span>Max. Plätze</span>
@@ -3434,6 +3525,16 @@ const CSS = `
 .kc-sub { color: var(--kc-muted); font-size: 15px; line-height: 1.5; margin: 0; }
 
 .kc-liste { display: flex; flex-direction: column; gap: 14px; }
+.kc-filter-leiste { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 4px; }
+.kc-filter-leiste .kc-feld { min-width: 140px; flex: 1; }
+.kc-filter-zuruecksetzen { flex-shrink: 0; }
+.kc-zielgruppen-auswahl { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.kc-checkbox-chip {
+  display: flex; align-items: center; gap: 6px;
+  background: #F2F4F1; border: 1.5px solid #D7DED6; border-radius: 999px;
+  padding: 6px 12px; font-size: 13px; font-weight: 500; cursor: pointer;
+}
+.kc-checkbox-chip input { margin: 0; }
 
 .kc-karte {
   background: var(--kc-card);
