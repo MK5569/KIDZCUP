@@ -1154,6 +1154,7 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
   const [gefundeneAnmeldung, setGefundeneAnmeldung] = useState(null);
   const [suchFehler, setSuchFehler] = useState("");
   const [angezeigterSpielplan, setAngezeigterSpielplan] = useState(null); // Turnier, dessen Plan gerade angezeigt wird
+  const [livePlan, setLivePlan] = useState(null); // wird alle paar Sekunden neu geladen, solange der Spielplan offen ist
   const [spielplanTeams, setSpielplanTeams] = useState([]); // nur {id, verein} der bestätigten Teams - keine Kontaktdaten
   const [angezeigteDokumenteFuer, setAngezeigteDokumenteFuer] = useState(null); // Turnier-Objekt oder "allgemein"
   const [angezeigteMannschaftenFuer, setAngezeigteMannschaftenFuer] = useState(null); // Turnier, dessen angemeldete Teams angezeigt werden
@@ -1180,6 +1181,24 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
         setSpielplanTeams([]);
       }
     })();
+  }, [angezeigterSpielplan]);
+
+  // Solange jemand den Spielplan offen hat, alle 20 Sekunden im Hintergrund neu laden -
+  // so sieht man neue Ergebnisse, ohne die Seite selbst neu laden zu müssen.
+  useEffect(() => {
+    if (!angezeigterSpielplan) { setLivePlan(null); return; }
+    let abgebrochen = false;
+    const laden = async () => {
+      try {
+        const zeilen = await supabaseSelect("spielplaene", `?turnier_id=eq.${angezeigterSpielplan.id}&select=*`);
+        if (!abgebrochen && zeilen && zeilen[0]) setLivePlan(spielplanAusDb(zeilen[0]));
+      } catch {
+        // Fehler beim Nachladen einfach ignorieren - die zuletzt bekannte Version bleibt sichtbar.
+      }
+    };
+    laden();
+    const intervall = setInterval(laden, 20000);
+    return () => { abgebrochen = true; clearInterval(intervall); };
   }, [angezeigterSpielplan]);
 
   // Sobald die Liste angemeldeter Mannschaften angezeigt wird, nur Vereinsname + Jugend laden
@@ -1356,13 +1375,16 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
   }
 
   if (angezeigterSpielplan) {
-    const plan = spielplaene.find((p) => p.turnierId === angezeigterSpielplan.id);
+    const plan = livePlan || spielplaene.find((p) => p.turnierId === angezeigterSpielplan.id);
     return (
       <div className="kc-section">
         <button className="kc-zurueck" onClick={() => setAngezeigterSpielplan(null)}>← Zurück zur Turnierliste</button>
         <h1 className="kc-h1">Spielplan: {angezeigterSpielplan.name}</h1>
         {plan ? (
-          <SpielplanAnzeige plan={plan} teams={spielplanTeams} turnier={angezeigterSpielplan} bearbeitbar={false} />
+          <>
+            <p className="kc-notiz">🔄 Aktualisiert sich automatisch alle 20 Sekunden.</p>
+            <SpielplanAnzeige plan={plan} teams={spielplanTeams} turnier={angezeigterSpielplan} bearbeitbar={false} />
+          </>
         ) : (
           <p className="kc-sub">Für dieses Turnier wurde noch kein Spielplan erstellt.</p>
         )}
