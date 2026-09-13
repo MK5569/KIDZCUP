@@ -224,7 +224,7 @@ function mailVorlage(typ, anmeldung, turnier) {
   }
   if (typ === "bestaetigung") {
     const einleitung = anmeldung.gebuehrenfrei
-      ? "euer Team ist von der Startgebühr befreit"
+      ? "eure Mannschaft ist von der Startgebühr befreit, ihr müsst nichts bezahlen"
       : "eure Zahlung ist bei uns eingegangen";
     return {
       betreff: `Teilnahme bestätigt – ${turnier?.name || "KIDZCUP"}`,
