@@ -666,6 +666,88 @@ function teilnehmerlisteAlsPdfHerunterladen(turnier, anmeldungen, jetzt) {
   doc.save(`teilnehmerliste-${turnier.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.pdf`);
 }
 
+// Berechnet pro Turnier: Anzahl bestätigter Teams, davon gebührenfrei, und die daraus
+// resultierenden tatsächlichen Einnahmen (nur bestätigte, nicht-gebührenfreie Teams zählen).
+function berechneEinnahmenProTurnier(turniere, anmeldungen) {
+  return turniere.map((t) => {
+    const bestaetigt = anmeldungen.filter((a) => a.turnierId === t.id && a.status === "bestaetigt");
+    const kostenfrei = bestaetigt.filter((a) => a.gebuehrenfrei);
+    const zahlend = bestaetigt.length - kostenfrei.length;
+    return {
+      turnier: t,
+      anzahlBestaetigt: bestaetigt.length,
+      anzahlKostenfrei: kostenfrei.length,
+      anzahlZahlend: zahlend,
+      einnahmen: zahlend * t.preis,
+    };
+  });
+}
+
+// Erstellt clientseitig ein PDF der Einnahmenübersicht für die eigenen Unterlagen des Veranstalters.
+function einnahmenAlsPdfHerunterladen(turniere, anmeldungen) {
+  const zeilen = berechneEinnahmenProTurnier(turniere, anmeldungen)
+    .filter((z) => z.anzahlBestaetigt > 0)
+    .sort((a, b) => new Date(a.turnier.datum) - new Date(b.turnier.datum));
+  const gesamtEinnahmen = zeilen.reduce((sum, z) => sum + z.einnahmen, 0);
+  const gesamtKostenfrei = zeilen.reduce((sum, z) => sum + z.anzahlKostenfrei, 0);
+
+  const doc = new jsPDF();
+  const seitenHoehe = doc.internal.pageSize.getHeight();
+  let y = 18;
+
+  const neueZeilePruefen = (hoehe = 7) => {
+    if (y + hoehe > seitenHoehe - 15) {
+      doc.addPage();
+      y = 18;
+    }
+  };
+
+  doc.setFontSize(16);
+  doc.text("Einnahmenübersicht", 14, y);
+  y += 7;
+  doc.setFontSize(8.5);
+  doc.setTextColor(120, 120, 120);
+  doc.text(`Erstellt am ${formatDatumZeit(Date.now())} · nur bestätigte Anmeldungen`, 14, y);
+  doc.setTextColor(0, 0, 0);
+  y += 10;
+
+  doc.setFontSize(9);
+  doc.setFont(undefined, "bold");
+  doc.text("Turnier", 14, y);
+  doc.text("Bestätigt", 110, y);
+  doc.text("Kostenfrei", 140, y);
+  doc.text("Einnahmen", 175, y);
+  doc.setFont(undefined, "normal");
+  y += 2;
+  doc.setDrawColor(180, 180, 180);
+  doc.line(14, y, 196, y);
+  y += 6;
+
+  zeilen.forEach((z) => {
+    neueZeilePruefen();
+    doc.setFontSize(9);
+    doc.text(`${z.turnier.name} (${formatDatum(z.turnier.datum)})`, 14, y, { maxWidth: 92 });
+    doc.text(String(z.anzahlBestaetigt), 114, y);
+    doc.text(String(z.anzahlKostenfrei), 146, y);
+    doc.text(`${z.einnahmen.toFixed(2)} €`, 175, y);
+    y += 7;
+  });
+
+  neueZeilePruefen(12);
+  y += 2;
+  doc.setDrawColor(30, 30, 30);
+  doc.line(14, y, 196, y);
+  y += 7;
+  doc.setFontSize(10);
+  doc.setFont(undefined, "bold");
+  doc.text("Gesamt", 14, y);
+  doc.text(String(gesamtKostenfrei) + " kostenfrei", 140, y);
+  doc.text(`${gesamtEinnahmen.toFixed(2)} €`, 175, y);
+  doc.setFont(undefined, "normal");
+
+  doc.save(`einnahmenuebersicht-${new Date().toISOString().slice(0, 10)}.pdf`);
+}
+
 // ---------- Supabase-Anbindung ----------
 //
 // Statt der Claude-eigenen window.storage-Funktion nutzt die App jetzt eine echte,
@@ -2278,6 +2360,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
   const [zeigeSponsorAnfragen, setZeigeSponsorAnfragen] = useState(false);
   const [sponsorAnfragen, setSponsorAnfragen] = useState([]);
   const [sponsorAnfragenLaedt, setSponsorAnfragenLaedt] = useState(false);
+  const [zeigeEinnahmen, setZeigeEinnahmen] = useState(false);
   const [offenerSpielplanTurnier, setOffenerSpielplanTurnier] = useState(null);
 
   const nachLoginProfilLaden = async (neueSession) => {
@@ -2687,6 +2770,9 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
             >
               Sponsor-Anfragen
             </button>
+            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => setZeigeEinnahmen((v) => !v)}>
+              Einnahmenübersicht
+            </button>
             <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={alleExportieren} disabled={anmeldungen.length === 0}>
               Alle als CSV exportieren
             </button>
@@ -2755,6 +2841,14 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
         />
       )}
 
+      {zeigeEinnahmen && (
+        <EinnahmenUebersicht
+          turniere={turniere}
+          anmeldungen={anmeldungen}
+          onSchliessen={() => setZeigeEinnahmen(false)}
+        />
+      )}
+
       {zeigeFormular && (
         <TurnierFormular
           bestehendesTurnier={bearbeitetesTurnier}
@@ -2769,6 +2863,9 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
           const regsFuerTurnier = anmeldungen.filter((a) => a.turnierId === t.id);
           const wartelisteRegs = regsFuerTurnier.filter((a) => effektiverStatus(a, jetzt) === "warteliste");
           const aktiveRegs = regsFuerTurnier.filter((a) => effektiverStatus(a, jetzt) !== "warteliste");
+          // Neu eingegangene, noch unbearbeitete Anmeldungen zuerst - die brauchen deine Aufmerksamkeit am dringendsten.
+          const neueRegs = aktiveRegs.filter((a) => effektiverStatus(a, jetzt) === "eingegangen");
+          const bearbeiteteRegs = aktiveRegs.filter((a) => effektiverStatus(a, jetzt) !== "eingegangen");
           const belegt = belegtePlaetze(t.id);
           const frei = Math.max(0, t.maxPlaetze - belegt);
           const offen = offenesTurnier === t.id;
@@ -2820,7 +2917,11 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
               {offen && (
                 <div className="kc-anmeldungs-tabelle">
                   {regsFuerTurnier.length === 0 && <p className="kc-notiz">Noch keine Anmeldungen.</p>}
-                  {aktiveRegs.map((a) => {
+
+                  {neueRegs.length > 0 && (
+                    <div className="kc-neu-block">
+                      <h3 className="kc-h3 kc-h3--neu">🆕 Neue Anmeldungen ({neueRegs.length})</h3>
+                      {neueRegs.map((a) => {
                     const st = effektiverStatus(a, jetzt);
                     return (
                       <div className="kc-anmeldungs-zeile" key={a.id}>
@@ -2879,7 +2980,67 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                         </div>
                       </div>
                     );
-                  })}
+                      })}
+                    </div>
+                  )}
+
+                  {bearbeiteteRegs.length > 0 && (
+                    <div className={neueRegs.length > 0 ? "kc-bereits-bearbeitet-block" : undefined}>
+                      {neueRegs.length > 0 && <h3 className="kc-h3">Bereits bearbeitet ({bearbeiteteRegs.length})</h3>}
+                      {bearbeiteteRegs.map((a) => {
+                    const st = effektiverStatus(a, jetzt);
+                    return (
+                      <div className="kc-anmeldungs-zeile" key={a.id}>
+                        <div>
+                          <strong>{a.verein}</strong> – Jahrgang {a.jahrgang} ({a.jugend}) · Trainer: {a.trainer}
+                          <div className="kc-notiz">{a.email} · {a.telefon}</div>
+                          {(a.spielstaerke || a.jahrgangTyp) && (
+                            <div className="kc-notiz">
+                              {a.jahrgangTyp && jahrgangTypLabel(a.jahrgangTyp)}
+                              {a.spielstaerke && a.jahrgangTyp && " · "}
+                              {a.spielstaerke && `Spielstärke: ${a.spielstaerke.charAt(0).toUpperCase()}${a.spielstaerke.slice(1)}`}
+                            </div>
+                          )}
+                          {a.notfallkontakt && <div className="kc-notiz">Notfallkontakt: {a.notfallkontakt}</div>}
+                          <div className="kc-notiz">Frist: {formatDatumZeit(a.frist)}</div>
+                          {a.zahlungsreferenz && <div className="kc-notiz">Referenz: {a.zahlungsreferenz}</div>}
+                          {a.bearbeitetVon && <div className="kc-notiz">Bearbeitet von: {a.bearbeitetVon}</div>}
+                          {a.gebuehrenfrei && <div className="kc-notiz" style={{ color: "var(--kc-green)", fontWeight: 600 }}>🆓 Gebührenfrei</div>}
+                        </div>
+                        <span className="kc-status-badge kc-status-badge--klein" style={{ background: STATUS_FARBE[st] }}>
+                          {STATUS_LABEL[st]}
+                        </span>
+                        {st === "zahlung_gemeldet" && (
+                          <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+                            <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "bestaetigt")}>Bestätigen</button>
+                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "abgelehnt")}>Ablehnen</button>
+                          </div>
+                        )}
+                        {st === "ausstehend" && (
+                          <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+                            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => erinnerungSenden(a)}>
+                              ✉️ Erinnerung senden
+                            </button>
+                          </div>
+                        )}
+                        <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+                          <a
+                            className="kc-btn kc-btn--sekundaer kc-btn--klein"
+                            href={whatsappLink(a.telefon, `Hallo ${a.trainer}, hier meldet sich KIDZCUP bezüglich eurer Anmeldung für "${t.name}".`)}
+                            target="_blank"
+                            rel="noopener"
+                          >
+                            📱 WhatsApp
+                          </a>
+                          <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungManuellLoeschen(a)} title="Löschung auf Anfrage, z. B. bei Auskunftsersuchen">
+                            🗑 Daten löschen
+                          </button>
+                        </div>
+                      </div>
+                    );
+                      })}
+                    </div>
+                  )}
 
                   {wartelisteRegs.length > 0 && (
                     <div className="kc-warteliste-block">
@@ -3298,6 +3459,58 @@ function SponsorAnfragenVerwalten({ anfragen, laedt, onMarkieren, onLoeschen, on
   );
 }
 
+function EinnahmenUebersicht({ turniere, anmeldungen, onSchliessen }) {
+  const zeilen = berechneEinnahmenProTurnier(turniere, anmeldungen)
+    .filter((z) => z.anzahlBestaetigt > 0)
+    .sort((a, b) => new Date(b.turnier.datum) - new Date(a.turnier.datum));
+  const gesamtEinnahmen = zeilen.reduce((sum, z) => sum + z.einnahmen, 0);
+  const gesamtKostenfrei = zeilen.reduce((sum, z) => sum + z.anzahlKostenfrei, 0);
+
+  return (
+    <div className="kc-section kc-formular-karte">
+      <h2 className="kc-h2">Einnahmenübersicht</h2>
+      <p className="kc-sub">
+        Nur bestätigte Anmeldungen zählen. Gebührenfreie Teams sind zwar bestätigt, tragen aber
+        nichts zu den Einnahmen bei.
+      </p>
+
+      {zeilen.length === 0 ? (
+        <p className="kc-notiz">Noch keine bestätigten Anmeldungen vorhanden.</p>
+      ) : (
+        <>
+          <div className="kc-anmeldungs-tabelle">
+            {zeilen.map((z) => (
+              <div className="kc-anmeldungs-zeile" key={z.turnier.id}>
+                <div>
+                  <strong>{z.turnier.name}</strong>
+                  <div className="kc-notiz">{formatDatum(z.turnier.datum)} · {z.anzahlBestaetigt} bestätigt, davon {z.anzahlKostenfrei} kostenfrei</div>
+                </div>
+                <div style={{ fontWeight: 700, fontSize: "15px" }}>{z.einnahmen.toFixed(2)} €</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="kc-einnahmen-gesamt">
+            <span>Gesamt ({gesamtKostenfrei} kostenfrei)</span>
+            <strong>{gesamtEinnahmen.toFixed(2)} €</strong>
+          </div>
+        </>
+      )}
+
+      <div className="kc-admin-aktionen" style={{ marginTop: "14px" }}>
+        <button
+          className="kc-btn kc-btn--primary"
+          onClick={() => einnahmenAlsPdfHerunterladen(turniere, anmeldungen)}
+          disabled={zeilen.length === 0}
+        >
+          📄 Als PDF herunterladen
+        </button>
+        <button className="kc-btn kc-btn--sekundaer" onClick={onSchliessen}>Schließen</button>
+      </div>
+    </div>
+  );
+}
+
 function TurnierFormular({ bestehendesTurnier, onAbsenden, onAbbrechen }) {
   const [form, setForm] = useState(() =>
     bestehendesTurnier
@@ -3622,6 +3835,9 @@ const CSS = `
 .kc-ds-hinweis-box { background: #FCF3DC; color: #7A5A00; padding: 8px 10px; border-radius: 6px; margin: 0 0 4px !important; }
 
 .kc-warteliste-block { margin-top: 6px; padding-top: 10px; border-top: 1px dashed #D7DED6; }
+.kc-neu-block { background: #EEF4FB; border: 1.5px solid var(--kc-blue); border-radius: 10px; padding: 10px 12px 4px; margin-bottom: 4px; display: flex; flex-direction: column; gap: 12px; }
+.kc-h3--neu { color: var(--kc-blue); margin-top: 0; }
+.kc-bereits-bearbeitet-block { margin-top: 10px; padding-top: 10px; border-top: 1px dashed #D7DED6; display: flex; flex-direction: column; gap: 12px; opacity: 0.85; }
 
 .kc-btn--block { display: block; width: 100%; margin-top: 8px; }
 
@@ -3682,6 +3898,8 @@ const CSS = `
 .kc-admin-aktionen--klein { margin-top: 8px; }
 
 .kc-anmeldungs-tabelle { margin-top: 14px; border-top: 1px solid #E5EAE3; padding-top: 12px; display: flex; flex-direction: column; gap: 12px; }
+.kc-einnahmen-gesamt { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; padding: 12px 14px; background: var(--kc-pitch); color: white; border-radius: 8px; font-size: 15px; }
+.kc-einnahmen-gesamt strong { font-size: 19px; }
 .kc-anmeldungs-zeile { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; padding: 10px 12px; background: #F8FAF7; border-radius: 8px; font-size: 13.5px; }
 
 @media (max-width: 480px) {
