@@ -1150,6 +1150,7 @@ export default function App() {
 function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielplaene, dokumente, deepLink, jetzt }) {
   const [ausgewaehlt, setAusgewaehlt] = useState(null);
   const [neueAnmeldung, setNeueAnmeldung] = useState(null); // frisch angelegte Anmeldung dieser Sitzung
+  const [mehrfachAnmeldungen, setMehrfachAnmeldungen] = useState(null); // bei Anmeldung mehrerer Mannschaften auf einmal
   const [codeSuche, setCodeSuche] = useState("");
   const [gefundeneAnmeldung, setGefundeneAnmeldung] = useState(null);
   const [suchFehler, setSuchFehler] = useState("");
@@ -1251,25 +1252,36 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
   const anmeldenBei = async (turnier, daten) => {
     setWirdGespeichert(true);
     try {
-      const jetztTs = Date.now();
-      const frei = turnier.maxPlaetze - belegtePlaetze(turnier.id);
-      const aufWarteliste = frei <= 0;
-      const neu = {
-        id: neueId("anm"),
-        turnierId: turnier.id,
-        ...daten,
-        angemeldetAm: jetztTs,
-        frist: null, // startet erst, sobald der Admin die Anmeldung annimmt
-        status: aufWarteliste ? "warteliste" : "eingegangen",
-      };
-      const gespeichert = await supabaseRpc("oeffentliche_anmeldung_erstellen", { p_daten: anmeldungZuDb(neu) });
-      const anmeldung = anmeldungAusDb(gespeichert);
-      setNeueAnmeldung(anmeldung);
+      const { teams, ...gemeinsam } = daten;
+      let bereitsBelegt = belegtePlaetze(turnier.id);
+      const erstellteAnmeldungen = [];
+      for (const team of teams) {
+        const jetztTs = Date.now();
+        const aufWarteliste = bereitsBelegt >= turnier.maxPlaetze;
+        const neu = {
+          id: neueId("anm"),
+          turnierId: turnier.id,
+          ...gemeinsam,
+          ...team,
+          angemeldetAm: jetztTs,
+          frist: null, // startet erst, sobald der Admin die Anmeldung annimmt
+          status: aufWarteliste ? "warteliste" : "eingegangen",
+        };
+        const gespeichert = await supabaseRpc("oeffentliche_anmeldung_erstellen", { p_daten: anmeldungZuDb(neu) });
+        const anmeldung = anmeldungAusDb(gespeichert);
+        erstellteAnmeldungen.push(anmeldung);
+        if (!aufWarteliste) bereitsBelegt++;
+        benachrichtigeBackend("neue_anmeldung", anmeldung, turnier); // informiert den Veranstalter per Mail, falls Backend eingerichtet ist
+      }
+      if (erstellteAnmeldungen.length === 1) {
+        setNeueAnmeldung(erstellteAnmeldungen[0]);
+      } else {
+        setMehrfachAnmeldungen(erstellteAnmeldungen);
+      }
       setAusgewaehlt(null);
       belegungNeuLaden();
-      benachrichtigeBackend("neue_anmeldung", anmeldung, turnier); // informiert den Veranstalter per Mail, falls Backend eingerichtet ist
     } catch (e) {
-      alert("Anmeldung konnte nicht gespeichert werden: " + e.message);
+      alert("Anmeldung konnte nicht vollständig gespeichert werden: " + e.message + " Bitte prüft über eure Anmeldecodes (falls schon welche vergeben wurden) oder meldet euch beim Veranstalter.");
     } finally {
       setWirdGespeichert(false);
     }
@@ -1327,6 +1339,44 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
       setSuchFehler("Fehler bei der Suche: " + e.message);
     }
   };
+
+  // Bestätigungsansicht nach Anmeldung mehrerer Mannschaften auf einmal
+  if (mehrfachAnmeldungen) {
+    const turnier = turniere.find((t) => t.id === mehrfachAnmeldungen[0]?.turnierId);
+    return (
+      <div className="kc-section">
+        <div className="kc-status-karte">
+          <h1 className="kc-h1">Anmeldung abgeschlossen</h1>
+          <p className="kc-sub">
+            Ihr habt {mehrfachAnmeldungen.length} Mannschaften für {turnier ? turnier.name : "das Turnier"} angemeldet.
+          </p>
+          <div className="kc-hinweis" style={{ margin: "14px 0" }}>
+            Jede Mannschaft hat einen <strong>eigenen Anmeldecode</strong> erhalten – bewahrt alle gut auf,
+            ihr braucht sie später einzeln, um den jeweiligen Status abzurufen (z. B. wann der Zahlungslink erscheint).
+          </div>
+          <div className="kc-anmeldungs-tabelle">
+            {mehrfachAnmeldungen.map((a) => {
+              const st = effektiverStatus(a, jetzt);
+              return (
+                <div className="kc-anmeldungs-zeile" key={a.id}>
+                  <div>
+                    <strong>{a.jugend}</strong> · Jahrgang {a.jahrgang}
+                    <div className="kc-notiz">Code: <code>{a.id}</code></div>
+                  </div>
+                  <span className="kc-status-badge kc-status-badge--klein" style={{ background: STATUS_FARBE[st] }}>
+                    {STATUS_LABEL[st]}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+          <button className="kc-btn kc-btn--primary" style={{ marginTop: "16px" }} onClick={() => setMehrfachAnmeldungen(null)}>
+            Fertig
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   // Bestätigungsansicht nach frischer Anmeldung
   if (neueAnmeldung) {
@@ -1679,10 +1729,9 @@ const MONATSNAMEN = [
 ];
 
 function AnmeldeFormular({ turnier, belegtePlaetze, pruefeDuplikat, jetzt, onAbbrechen, onAbsenden }) {
-  const [form, setForm] = useState({
-    verein: "", trainer: "", jahrgang: "", jugend: "", email: "", telefon: "", notfallkontakt: "",
-    spielstaerke: "", jahrgangTyp: "",
-  });
+  const [form, setForm] = useState({ verein: "", trainer: "", email: "", telefon: "", notfallkontakt: "" });
+  const [anzahlMannschaften, setAnzahlMannschaften] = useState(1);
+  const [teams, setTeams] = useState([{ jahrgang: "", jugend: "", jahrgangTyp: "", spielstaerke: "" }]);
   const [datenschutzOk, setDatenschutzOk] = useState(false);
   const [zeigeDatenschutz, setZeigeDatenschutz] = useState(false);
   const [teilnahmebedingungenOk, setTeilnahmebedingungenOk] = useState(false);
@@ -1694,19 +1743,42 @@ function AnmeldeFormular({ turnier, belegtePlaetze, pruefeDuplikat, jetzt, onAbb
 
   const feld = (name) => (e) => setForm({ ...form, [name]: e.target.value });
 
+  const anzahlAendern = (e) => {
+    const n = Number(e.target.value);
+    setAnzahlMannschaften(n);
+    setTeams((prev) => {
+      const kopie = [...prev];
+      while (kopie.length < n) kopie.push({ jahrgang: "", jugend: "", jahrgangTyp: "", spielstaerke: "" });
+      while (kopie.length > n) kopie.pop();
+      return kopie;
+    });
+  };
+
+  const teamFeld = (index, name) => (e) =>
+    setTeams((prev) => prev.map((t, i) => (i === index ? { ...t, [name]: e.target.value } : t)));
+
+  const teamsVollstaendig = teams.every((t) => t.jahrgang.trim() && t.jugend && t.jahrgangTyp && t.spielstaerke);
+  const jugendMehrfach = new Set(teams.map((t) => t.jugend)).size !== teams.length;
+
   const gueltig =
-    form.verein.trim() && form.trainer.trim() && form.jahrgang.trim() && form.jugend.trim() &&
-    form.email.trim() && form.telefon.trim() && form.spielstaerke && form.jahrgangTyp && datenschutzOk && teilnahmebedingungenOk;
+    form.verein.trim() && form.trainer.trim() && form.email.trim() && form.telefon.trim() &&
+    teamsVollstaendig && datenschutzOk && teilnahmebedingungenOk;
 
   const absenden = async (e) => {
     e.preventDefault();
     if (!gueltig || wirdGeprueft) return;
+    if (jugendMehrfach) {
+      setFehler("Jede Mannschaft braucht eine eigene Jugend-Kategorie – bitte bei jeder Mannschaft eine unterschiedliche Jugend auswählen.");
+      return;
+    }
     setWirdGeprueft(true);
     try {
-      const bereitsAngemeldet = await pruefeDuplikat(turnier.id, form.verein.trim(), form.jugend.trim());
-      if (bereitsAngemeldet) {
-        setFehler(`"${form.verein}" (${form.jugend}) ist für dieses Turnier bereits angemeldet. Falls das ein Irrtum ist, wendet euch bitte an den Veranstalter.`);
-        return;
+      for (const team of teams) {
+        const bereitsAngemeldet = await pruefeDuplikat(turnier.id, form.verein.trim(), team.jugend);
+        if (bereitsAngemeldet) {
+          setFehler(`"${form.verein}" (${team.jugend}) ist für dieses Turnier bereits angemeldet. Falls das ein Irrtum ist, wendet euch bitte an den Veranstalter.`);
+          return;
+        }
       }
       setFehler("");
       onAbsenden({
@@ -1714,6 +1786,7 @@ function AnmeldeFormular({ turnier, belegtePlaetze, pruefeDuplikat, jetzt, onAbb
         fotoEinverstaendnis,
         datenschutzAkzeptiertAm: Date.now(),
         teilnahmebedingungenAkzeptiertAm: Date.now(),
+        teams,
       });
     } finally {
       setWirdGeprueft(false);
@@ -1728,13 +1801,13 @@ function AnmeldeFormular({ turnier, belegtePlaetze, pruefeDuplikat, jetzt, onAbb
       )}
       <h1 className="kc-h1">Anmeldung: {turnier.name}</h1>
       <p className="kc-sub">
-        {formatTermin(turnier)} · {turnier.ort} · {turnier.preis} € Startgebühr · noch {frei} Plätze frei
+        {formatTermin(turnier)} · {turnier.ort} · {turnier.preis} € Startgebühr pro Mannschaft · noch {frei} Plätze frei
       </p>
       {turnier.beschreibung && <p className="kc-turnier-beschreibung">{turnier.beschreibung}</p>}
 
       {frei === 0 && (
         <div className="kc-hinweis kc-hinweis--warteliste">
-          Dieses Turnier ist aktuell ausgebucht. Deine Anmeldung landet auf der Warteliste – sobald ein Platz frei wird, wirst du aufgenommen und erhältst ab dann 3 Tage Zeit zur Zahlung.
+          Dieses Turnier ist aktuell ausgebucht. Eure Anmeldung(en) landen auf der Warteliste – sobald Plätze frei werden, rückt ihr nach und erhaltet ab dann 3 Tage Zeit zur Zahlung.
         </div>
       )}
 
@@ -1744,44 +1817,59 @@ function AnmeldeFormular({ turnier, belegtePlaetze, pruefeDuplikat, jetzt, onAbb
           <input className="kc-input" value={form.verein} onChange={feld("verein")} required />
         </label>
         <label className="kc-feld">
-          <span>Trainer</span>
+          <span>Trainer / Ansprechpartner</span>
           <input className="kc-input" value={form.trainer} onChange={feld("trainer")} required />
         </label>
-        <div className="kc-feld-reihe">
-          <label className="kc-feld">
-            <span>Jahrgang</span>
-            <input className="kc-input" type="number" min="2005" max="2026" placeholder="z. B. 2016" value={form.jahrgang} onChange={feld("jahrgang")} required />
-          </label>
-          <label className="kc-feld">
-            <span>Jugend</span>
-            <select className="kc-input" value={form.jugend} onChange={feld("jugend")} required>
-              <option value="" disabled>Bitte wählen…</option>
-              {JUGEND_KATEGORIEN.map((k) => (
-                <option key={k} value={k}>{k}</option>
-              ))}
-            </select>
-          </label>
-        </div>
-        <div className="kc-feld-reihe">
-          <label className="kc-feld">
-            <span>Jahrgangs-Ausrichtung</span>
-            <select className="kc-input" value={form.jahrgangTyp} onChange={feld("jahrgangTyp")} required>
-              <option value="" disabled>Bitte wählen…</option>
-              <option value="alt">Älterer Jahrgang der Altersklasse</option>
-              <option value="jung">Jüngerer Jahrgang der Altersklasse</option>
-              <option value="gemischt">Gemischt (älterer &amp; jüngerer Jahrgang)</option>
-            </select>
-          </label>
-          <label className="kc-feld">
-            <span>Spielstärke der Mannschaft</span>
-            <select className="kc-input" value={form.spielstaerke} onChange={feld("spielstaerke")} required>
-              <option value="" disabled>Bitte wählen…</option>
-              <option value="stark">Stark</option>
-              <option value="mittel">Mittel</option>
-              <option value="schwach">Schwach</option>
-            </select>
-          </label>
-        </div>
+        <label className="kc-feld">
+          <span>Wie viele Mannschaften meldet ihr für dieses Turnier an?</span>
+          <select className="kc-input" value={anzahlMannschaften} onChange={anzahlAendern}>
+            {[1, 2, 3, 4, 5].map((n) => (
+              <option key={n} value={n}>{n} Mannschaft{n !== 1 ? "en" : ""}</option>
+            ))}
+          </select>
+        </label>
+
+        {teams.map((team, i) => (
+          <div className="kc-team-block" key={i}>
+            {teams.length > 1 && <h3 className="kc-h3">Mannschaft {i + 1}</h3>}
+            <div className="kc-feld-reihe">
+              <label className="kc-feld">
+                <span>Jahrgang</span>
+                <input className="kc-input" type="number" min="2005" max="2026" placeholder="z. B. 2016" value={team.jahrgang} onChange={teamFeld(i, "jahrgang")} required />
+              </label>
+              <label className="kc-feld">
+                <span>Jugend</span>
+                <select className="kc-input" value={team.jugend} onChange={teamFeld(i, "jugend")} required>
+                  <option value="" disabled>Bitte wählen…</option>
+                  {JUGEND_KATEGORIEN.map((k) => (
+                    <option key={k} value={k}>{k}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div className="kc-feld-reihe">
+              <label className="kc-feld">
+                <span>Jahrgangs-Ausrichtung</span>
+                <select className="kc-input" value={team.jahrgangTyp} onChange={teamFeld(i, "jahrgangTyp")} required>
+                  <option value="" disabled>Bitte wählen…</option>
+                  <option value="alt">Älterer Jahrgang der Altersklasse</option>
+                  <option value="jung">Jüngerer Jahrgang der Altersklasse</option>
+                  <option value="gemischt">Gemischt (älterer &amp; jüngerer Jahrgang)</option>
+                </select>
+              </label>
+              <label className="kc-feld">
+                <span>Spielstärke der Mannschaft</span>
+                <select className="kc-input" value={team.spielstaerke} onChange={teamFeld(i, "spielstaerke")} required>
+                  <option value="" disabled>Bitte wählen…</option>
+                  <option value="stark">Stark</option>
+                  <option value="mittel">Mittel</option>
+                  <option value="schwach">Schwach</option>
+                </select>
+              </label>
+            </div>
+          </div>
+        ))}
+
         <label className="kc-feld">
           <span>E-Mail</span>
           <input className="kc-input" type="email" value={form.email} onChange={feld("email")} required />
@@ -1802,8 +1890,8 @@ function AnmeldeFormular({ turnier, belegtePlaetze, pruefeDuplikat, jetzt, onAbb
 
         {frei > 0 && (
           <div className="kc-hinweis">
-            Nach der Anmeldung hast du <strong>3 Tage</strong> Zeit, die Startgebühr über den bereitgestellten Zahlungslink zu begleichen.
-            Ohne fristgerechte Zahlung wird die Teilnahme nicht bestätigt und der Platz wird freigegeben.
+            Nach der Annahme durch den Veranstalter habt ihr pro Mannschaft <strong>3 Tage</strong> Zeit, die Startgebühr über den bereitgestellten Zahlungslink zu begleichen.
+            Reichen die freien Plätze nicht für alle angemeldeten Mannschaften, landen die überzähligen automatisch auf der Warteliste.
           </div>
         )}
 
@@ -1820,7 +1908,7 @@ function AnmeldeFormular({ turnier, belegtePlaetze, pruefeDuplikat, jetzt, onAbb
         <div className="kc-datenschutz">
           <label className="kc-checkbox-zeile">
             <input type="checkbox" checked={teilnahmebedingungenOk} onChange={(e) => setTeilnahmebedingungenOk(e.target.checked)} />
-            <span>Ich habe die <button type="button" className="kc-inline-link" onClick={() => setZeigeTeilnahmebedingungen((v) => !v)}>Teilnahmebedingungen</button> gelesen und akzeptiere sie für unsere Mannschaft. *</span>
+            <span>Ich habe die <button type="button" className="kc-inline-link" onClick={() => setZeigeTeilnahmebedingungen((v) => !v)}>Teilnahmebedingungen</button> gelesen und akzeptiere sie für unsere Mannschaft(en). *</span>
           </label>
           {zeigeTeilnahmebedingungen && <TeilnahmebedingungenText />}
         </div>
@@ -1828,14 +1916,14 @@ function AnmeldeFormular({ turnier, belegtePlaetze, pruefeDuplikat, jetzt, onAbb
         <div className="kc-datenschutz">
           <label className="kc-checkbox-zeile">
             <input type="checkbox" checked={fotoEinverstaendnis} onChange={(e) => setFotoEinverstaendnis(e.target.checked)} />
-            <span>Wir sind damit einverstanden, dass beim Turnier entstandene Foto- und Videoaufnahmen unseres Teams für Social Media, Website und Presse des Veranstalters verwendet werden dürfen (freiwillig, jederzeit widerrufbar).</span>
+            <span>Wir sind damit einverstanden, dass beim Turnier entstandene Foto- und Videoaufnahmen unserer/unseres Teams für Social Media, Website und Presse des Veranstalters verwendet werden dürfen (freiwillig, jederzeit widerrufbar).</span>
           </label>
         </div>
 
         <p className="kc-notiz">* Pflichtangabe</p>
 
         <button className="kc-btn kc-btn--primary" type="submit" disabled={!gueltig || wirdGeprueft}>
-          {wirdGeprueft ? "Wird geprüft …" : frei > 0 ? "Verbindlich anmelden" : "Auf Warteliste anmelden"}
+          {wirdGeprueft ? "Wird geprüft …" : anzahlMannschaften > 1 ? `${anzahlMannschaften} Mannschaften anmelden` : frei > 0 ? "Verbindlich anmelden" : "Auf Warteliste anmelden"}
         </button>
       </form>
     </div>
@@ -3805,6 +3893,7 @@ const CSS = `
 .kc-formular { display: flex; flex-direction: column; gap: 14px; margin-top: 16px; }
 .kc-feld { display: flex; flex-direction: column; gap: 6px; font-size: 13.5px; font-weight: 600; color: var(--kc-pitch); flex: 1; }
 .kc-feld-reihe { display: flex; gap: 14px; flex-wrap: wrap; }
+.kc-team-block { background: #F4F6F3; border-radius: 10px; padding: 14px 14px 2px; border-left: 3px solid var(--kc-green); display: flex; flex-direction: column; gap: 14px; }
 .kc-feld-reihe .kc-feld { min-width: 140px; }
 .kc-input {
   border: 1.5px solid #D7DED6;
