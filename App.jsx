@@ -196,6 +196,16 @@ function whatsappLink(telefon, nachricht) {
   return `https://wa.me/${nummer}?text=${encodeURIComponent(nachricht)}`;
 }
 
+// Baut den Zahlungsabschnitt einer Mail: Link (falls vorhanden) + Bankverbindung (falls hinterlegt).
+// Wird bei jeder Mail verwendet, die zur Zahlung auffordert, damit beide Wege konsistent genannt werden.
+function bauZahlungshinweis(anmeldung, turnier) {
+  const zahlLinkZeile = turnier?.zahlLink ? `Zahlungslink:\n${turnier.zahlLink}\n\n` : "";
+  const bankZeile = turnier?.iban
+    ? `Alternativ per Überweisung:\nIBAN: ${formatIban(turnier.iban)}\n${turnier.kontoinhaber ? `Kontoinhaber: ${turnier.kontoinhaber}\n` : ""}Verwendungszweck: ${anmeldung.verein} – ${turnier?.name}\n\n`
+    : "";
+  return zahlLinkZeile || bankZeile ? `${zahlLinkZeile}${bankZeile}` : "(Zahlungsmöglichkeit beim Veranstalter erfragen)\n\n";
+}
+
 function mailVorlage(typ, anmeldung, turnier) {
   const frist = anmeldung.frist ? formatDatumZeit(anmeldung.frist) : "";
   const termin = turnier ? `${formatTermin(turnier)} in ${turnier.ort}` : "";
@@ -207,7 +217,8 @@ function mailVorlage(typ, anmeldung, turnier) {
       text:
         `Hallo ${anmeldung.trainer || ""},\n\n` +
         `eure Anmeldung von ${anmeldung.verein} für "${turnier?.name}" (${termin}) wurde angenommen.\n\n` +
-        `Bitte zahlt die Startgebühr von ${turnier?.preis} € bis spätestens ${frist} über folgenden Link:\n${turnier?.zahlLink || "(Zahlungslink beim Veranstalter erfragen)"}\n\n` +
+        `Bitte zahlt die Startgebühr von ${turnier?.preis} € bis spätestens ${frist}.\n\n` +
+        bauZahlungshinweis(anmeldung, turnier) +
         `Ohne fristgerechte Zahlung können wir die Teilnahme leider nicht bestätigen.\n\n${gruss}`,
     };
   }
@@ -218,7 +229,8 @@ function mailVorlage(typ, anmeldung, turnier) {
         `Hallo ${anmeldung.trainer || ""},\n\n` +
         `eure Anmeldung von ${anmeldung.verein} für "${turnier?.name}" (${termin}) ist noch nicht bestätigt, ` +
         `da die Startgebühr von ${turnier?.preis} € bisher nicht bei uns eingegangen ist.\n\n` +
-        `Bitte zahlt bis spätestens ${frist} über folgenden Link:\n${turnier?.zahlLink || "(Zahlungslink beim Veranstalter erfragen)"}\n\n` +
+        `Bitte zahlt bis spätestens ${frist}.\n\n` +
+        bauZahlungshinweis(anmeldung, turnier) +
         `Ohne fristgerechte Zahlung können wir die Teilnahme leider nicht bestätigen.\n\n${gruss}`,
     };
   }
@@ -251,7 +263,8 @@ function mailVorlage(typ, anmeldung, turnier) {
         `Hallo ${anmeldung.trainer || ""},\n\n` +
         `gute Neuigkeiten: Für "${turnier?.name}" (${termin}) ist ein Platz frei geworden und eure Mannschaft ${anmeldung.verein} ` +
         `rückt von der Warteliste ins Turnier nach.\n\n` +
-        `Bitte zahlt die Startgebühr von ${turnier?.preis} € bis spätestens ${frist} über:\n${turnier?.zahlLink || "(Zahlungslink beim Veranstalter erfragen)"}\n\n` +
+        `Bitte zahlt die Startgebühr von ${turnier?.preis} € bis spätestens ${frist}.\n\n` +
+        bauZahlungshinweis(anmeldung, turnier) +
         `Ohne fristgerechte Zahlung wird der Platz erneut freigegeben.\n\n${gruss}`,
     };
   }
