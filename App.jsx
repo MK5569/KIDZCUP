@@ -2784,6 +2784,25 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     benachrichtigen("erinnerung", anmeldung, turnier);
   };
 
+  // Verlängert die abgelaufene Zahlungsfrist um weitere 3 Tage, ohne den Platz freizugeben.
+  // Informiert den Verein automatisch über die neue Frist (nutzt dieselbe Vorlage wie "Erinnerung").
+  const fristVerlaengern = async (anmeldungId) => {
+    const anmeldung = anmeldungen.find((a) => a.id === anmeldungId);
+    const neueFrist = Date.now() + DREI_TAGE_MS;
+    const zeile = await supabaseUpdate(
+      "anmeldungen", anmeldungId,
+      { frist: new Date(neueFrist).toISOString(), bearbeitet_von: adminProfil.name || "" },
+      session.access_token
+    );
+    const aktualisierteAnmeldung = anmeldungAusDb(zeile[0]);
+    setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
+    belegungNeuLaden();
+    if (anmeldung) {
+      const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
+      benachrichtigen("erinnerung", aktualisierteAnmeldung, turnier);
+    }
+  };
+
   const alleExportieren = () => {
     csvHerunterladen(`kidzcup-anmeldungen-alle-${Date.now()}.csv`, anmeldungenAlsCsv(anmeldungen, turniere, jetzt));
   };
@@ -3184,6 +3203,16 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                             </button>
                           </div>
                         )}
+                        {st === "abgelaufen" && (
+                          <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+                            <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => fristVerlaengern(a.id)}>
+                              ⏱ Frist um 3 Tage verlängern
+                            </button>
+                            <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "bestaetigt")}>
+                              ✅ Direkt bestätigen (bereits bezahlt)
+                            </button>
+                          </div>
+                        )}
                         <div className="kc-admin-aktionen kc-admin-aktionen--klein">
                           <a
                             className="kc-btn kc-btn--sekundaer kc-btn--klein"
@@ -3273,6 +3302,16 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                             </button>
                             <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => erinnerungSenden(a)}>
                               ✉️ Erinnerung senden
+                            </button>
+                          </div>
+                        )}
+                        {st === "abgelaufen" && (
+                          <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+                            <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => fristVerlaengern(a.id)}>
+                              ⏱ Frist um 3 Tage verlängern
+                            </button>
+                            <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "bestaetigt")}>
+                              ✅ Direkt bestätigen (bereits bezahlt)
                             </button>
                           </div>
                         )}
