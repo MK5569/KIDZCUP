@@ -155,41 +155,43 @@ function telefonInternational(telefon) {
   return n ? "+" + n : "";
 }
 
-// Erstellt eine vCard-Datei (.vcf) mit allen Kontakten einer Anmeldungsliste. Tippt man die
-// heruntergeladene Datei auf dem Handy an, öffnet sich automatisch die Kontakte-App mit einer
-// Vorschau aller Einträge - "Alle hinzufügen" reicht dann, um sie ins Adressbuch zu übernehmen.
-function kontakteAlsVcfHerunterladen(turnier, liste) {
+// Erstellt eine vCard-Datei (.vcf) mit allen Kontakten einer Anmeldungsliste und gibt eine
+// herunterladbare Blob-URL zurück. Wird NICHT automatisch angeklickt: iOS Safari öffnet .vcf-Dateien
+// bei einem normalen Tippen immer als Schnellvorschau mit nur EINEM Kontakt, komplett am Dateisystem
+// vorbei - das lässt sich nur umgehen, wenn die Person selbst lange auf einen echten Link drückt und
+// "Datei herunterladen" wählt. Deshalb geben wir hier nur die URL zurück, die Anzeige als lang-drückbarer
+// Link erfolgt in der Admin-Ansicht.
+function vcardFeldEscape(text) {
+  return String(text || "").replace(/\\/g, "\\\\").replace(/,/g, "\\,").replace(/;/g, "\\;");
+}
+
+function kontakteVcfVorbereiten(turnier, liste) {
   const karten = liste
     .filter((a) => a.telefon)
     .map((a) => {
-      const name = `${a.verein} (${a.trainer})`.replace(/[\r\n]/g, " ");
+      const name = vcardFeldEscape(`${a.verein} (${a.trainer})`);
+      const verein = vcardFeldEscape(a.verein);
       const zeilen = [
         "BEGIN:VCARD",
         "VERSION:3.0",
+        `N:${verein};;;;`,
         `FN:${name}`,
-        `ORG:${a.verein}`,
+        `ORG:${verein}`,
         `TEL;TYPE=CELL:${telefonInternational(a.telefon)}`,
-        a.email ? `EMAIL:${a.email}` : null,
-        `NOTE:KIDZCUP – ${turnier.name}`,
+        a.email ? `EMAIL:${vcardFeldEscape(a.email)}` : null,
+        `NOTE:KIDZCUP - ${vcardFeldEscape(turnier.name)}`,
         "END:VCARD",
       ];
       return zeilen.filter(Boolean).join("\r\n");
     });
 
-  if (karten.length === 0) {
-    alert("Keine Telefonnummern zum Exportieren vorhanden.");
-    return;
-  }
+  if (karten.length === 0) return null;
 
-  const blob = new Blob([karten.join("\r\n")], { type: "text/vcard;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `kontakte-${turnier.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.vcf`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  const blob = new Blob([karten.join("\r\n") + "\r\n"], { type: "text/vcard;charset=utf-8;" });
+  return {
+    url: URL.createObjectURL(blob),
+    dateiname: `kontakte-${turnier.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.vcf`,
+  };
 }
 
 // Kontaktdaten des Veranstalters – hier zentral eintragen, wird u. a. im Datenschutztext verwendet.
@@ -2530,6 +2532,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
   const [sponsorAnfragen, setSponsorAnfragen] = useState([]);
   const [sponsorAnfragenLaedt, setSponsorAnfragenLaedt] = useState(false);
   const [zeigeEinnahmen, setZeigeEinnahmen] = useState(false);
+  const [vcfExport, setVcfExport] = useState(null); // { turnierId, url, dateiname } - lang-drückbarer Kontakte-Export-Link
   const [offenerSpielplanTurnier, setOffenerSpielplanTurnier] = useState(null);
 
   const nachLoginProfilLaden = async (neueSession) => {
@@ -3090,7 +3093,11 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                 </button>
                 <button
                   className="kc-btn kc-btn--sekundaer"
-                  onClick={() => kontakteAlsVcfHerunterladen(t, bestaetigteRegs)}
+                  onClick={() => {
+                    const ergebnis = kontakteVcfVorbereiten(t, bestaetigteRegs);
+                    if (!ergebnis) { alert("Keine Telefonnummern zum Exportieren vorhanden."); return; }
+                    setVcfExport({ turnierId: t.id, ...ergebnis });
+                  }}
                   disabled={bestaetigteRegs.length === 0}
                   title="Legt alle bestätigten Vereine als Kontakte an - zum Import ins Adressbuch antippen"
                 >
@@ -3098,6 +3105,23 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                 </button>
                 <button className="kc-btn kc-btn--gefahr" onClick={() => turnierLoeschen(t.id)}>Löschen</button>
               </div>
+
+              {vcfExport && vcfExport.turnierId === t.id && (
+                <div className="kc-vcf-hinweis">
+                  <p>
+                    <strong>Wichtig auf dem iPhone:</strong> Den Link unten <strong>lange gedrückt halten</strong>
+                    (nicht normal antippen!) und „Datei herunterladen" wählen. Danach in der Dateien-App öffnen –
+                    erst dort erscheinen alle {bestaetigteRegs.length} Kontakte mit „Alle hinzufügen".
+                    Normales Antippen zeigt auf dem iPhone nur einen einzelnen Kontakt.
+                  </p>
+                  <a href={vcfExport.url} download={vcfExport.dateiname} className="kc-btn kc-btn--primary kc-btn--block">
+                    📇 {vcfExport.dateiname}
+                  </a>
+                  <button className="kc-btn kc-btn--sekundaer kc-btn--klein" style={{ marginTop: "8px" }} onClick={() => setVcfExport(null)}>
+                    Schließen
+                  </button>
+                </div>
+              )}
 
               {offen && (
                 <div className="kc-anmeldungs-tabelle">
@@ -4066,6 +4090,8 @@ const CSS = `
 .kc-status-chip--gruen { background: #E4F3EA; color: #1E6E3C; }
 .kc-status-chip--gelb { background: #FCF3DC; color: #7A5A00; }
 .kc-bestaetigt-block { background: #F0F8F3; border: 1.5px solid var(--kc-green); border-radius: 10px; padding: 10px 12px 4px; margin-bottom: 4px; display: flex; flex-direction: column; gap: 12px; }
+.kc-vcf-hinweis { background: #FCF3DC; border: 1.5px solid #E0A100; border-radius: 10px; padding: 12px 14px; margin-top: 10px; }
+.kc-vcf-hinweis p { margin: 0 0 10px; font-size: 13px; color: #7A5A00; line-height: 1.5; }
 .kc-h3--bestaetigt { color: var(--kc-green); margin-top: 0; }
 
 .kc-btn--block { display: block; width: 100%; margin-top: 8px; }
