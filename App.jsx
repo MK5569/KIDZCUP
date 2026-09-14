@@ -616,6 +616,7 @@ function spielplanMitZeit(plan, spielId, uhrzeit, feld) {
 function spielplanAlsPdfHerunterladen(plan, teams, turnier) {
   const teamName = (id) => {
     if (!id) return "Freilos";
+    if (plan.teamNamen && plan.teamNamen[id]) return plan.teamNamen[id];
     const t = teams.find((a) => a.id === id);
     return t ? t.verein : "–";
   };
@@ -1200,6 +1201,7 @@ function spielplanAusDb(p) {
     mitRueckrunde: !!p.mit_rueckrunde,
     qualifiziertProGruppe: p.qualifiziert_pro_gruppe || null,
     spielUmPlatz3Wunsch: !!p.spiel_um_platz3_wunsch,
+    teamNamen: p.team_namen || {},
   };
 }
 function spielplanZuDb(p) {
@@ -1209,6 +1211,7 @@ function spielplanZuDb(p) {
     mit_rueckrunde: !!p.mitRueckrunde,
     qualifiziert_pro_gruppe: p.qualifiziertProGruppe || null,
     spiel_um_platz3_wunsch: !!p.spielUmPlatz3Wunsch,
+    team_namen: p.teamNamen || {},
   };
 }
 
@@ -2305,6 +2308,7 @@ function AnmeldeStatusKarte({ anmeldung, turnier, jetzt, alsBezahltMelden, fotoE
 function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern, onZeitSpeichern }) {
   const teamName = (id) => {
     if (!id) return "Freilos";
+    if (plan.teamNamen && plan.teamNamen[id]) return plan.teamNamen[id];
     const t = teams.find((a) => a.id === id);
     return t ? t.verein : "–";
   };
@@ -2617,7 +2621,54 @@ function EndrundeStarten({ onEndrundeStarten, turnier }) {
   );
 }
 
-function SpielplanVerwaltung({ turnier, anmeldungen, plan, onErstellen, onSpielSpeichern, onZeitSpeichern, onEndrundeStarten, onNeuErstellen }) {
+// Erlaubt dem Admin, pro Mannschaft einen eigenen Anzeigenamen für den Spielplan zu vergeben
+// (z. B. "Kickers Lila" / "Kickers Gold", wenn ein Verein mehrere Teams meldet, ohne sie in der
+// Anmeldung selbst klar zu unterscheiden). Ändert nur die Anzeige, nicht die eigentliche Anmeldung.
+function TeamNamenBearbeiten({ bestaetigteTeams, teamNamen, onSpeichern }) {
+  const [offen, setOffen] = useState(false);
+  const [eingaben, setEingaben] = useState({});
+
+  if (bestaetigteTeams.length === 0) return null;
+
+  const wertFuer = (teamId) => (eingaben[teamId] !== undefined ? eingaben[teamId] : (teamNamen?.[teamId] || ""));
+
+  return (
+    <div className="kc-section kc-formular-karte">
+      <div className="kc-admin-aktionen" style={{ marginTop: 0 }}>
+        <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => setOffen((v) => !v)}>
+          {offen ? "Teamnamen ausblenden" : "🏷️ Teamnamen anpassen"}
+        </button>
+      </div>
+      {offen && (
+        <>
+          <p className="kc-notiz">
+            Nützlich, wenn ein Verein mehrere Mannschaften meldet, ohne sie klar zu unterscheiden
+            (z. B. "Kickers Lila" / "Kickers Gold"). Ändert nur die Anzeige im Spielplan, nicht die Anmeldung selbst.
+          </p>
+          <div className="kc-anmeldungs-tabelle">
+            {bestaetigteTeams.map((a) => (
+              <div className="kc-anmeldungs-zeile" key={a.id}>
+                <div>
+                  <strong>{a.verein}</strong>
+                  <div className="kc-notiz">{a.jahrgang} / {a.jugend}</div>
+                </div>
+                <input
+                  className="kc-input kc-input--klein"
+                  placeholder={a.verein}
+                  value={wertFuer(a.id)}
+                  onChange={(e) => setEingaben({ ...eingaben, [a.id]: e.target.value })}
+                  onBlur={(e) => onSpeichern(a.id, e.target.value)}
+                />
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function SpielplanVerwaltung({ turnier, anmeldungen, plan, onErstellen, onSpielSpeichern, onZeitSpeichern, onEndrundeStarten, onNamenSpeichern, onNeuErstellen }) {
   const bestaetigteTeams = anmeldungen.filter((a) => a.turnierId === turnier.id && a.status === "bestaetigt");
   const spielplanLink = `${window.location.origin}${window.location.pathname}?turnier=${encodeURIComponent(turnier.id)}&ansicht=spielplan`;
   const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(spielplanLink)}`;
@@ -2643,6 +2694,8 @@ function SpielplanVerwaltung({ turnier, anmeldungen, plan, onErstellen, onSpielS
               </div>
             </div>
           </div>
+
+          <TeamNamenBearbeiten bestaetigteTeams={bestaetigteTeams} teamNamen={plan.teamNamen} onSpeichern={onNamenSpeichern} />
 
           <SpielplanAnzeige plan={plan} teams={anmeldungen} turnier={turnier} bearbeitbar onSpielSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} />
 
@@ -3206,6 +3259,19 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     setSpielplaene((prev) => prev.map((p) => (p.id === plan.id ? spielplanAusDb(zeile[0]) : p)));
   };
 
+  // Ändert nur die Anzeige im Spielplan (z. B. "Kickers Lila" statt zweimal "Kickers"),
+  // ohne die eigentliche Anmeldung/Kontaktdaten anzufassen.
+  const teamNamenSpeichern = async (turnierId, teamId, name) => {
+    const plan = spielplaene.find((p) => p.turnierId === turnierId);
+    if (!plan) return;
+    const neueNamen = { ...(plan.teamNamen || {}) };
+    if (name && name.trim()) neueNamen[teamId] = name.trim();
+    else delete neueNamen[teamId];
+    const aktualisiert = { ...plan, teamNamen: neueNamen };
+    const zeile = await supabaseUpdate("spielplaene", plan.id, spielplanZuDb(aktualisiert), session.access_token);
+    setSpielplaene((prev) => prev.map((p) => (p.id === plan.id ? spielplanAusDb(zeile[0]) : p)));
+  };
+
   const dokumentHochladen = async (datei, titel, turnierId) => {
     const id = neueId("dok");
     const dateiendung = datei.name.includes(".") ? datei.name.slice(datei.name.lastIndexOf(".")) : "";
@@ -3272,6 +3338,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
           onSpielSpeichern={(spielId, h, g, sieger) => spielSpeichern(offenerSpielplanTurnier.id, spielId, h, g, sieger)}
           onZeitSpeichern={(spielId, uhrzeit, feld) => zeitSpeichern(offenerSpielplanTurnier.id, spielId, uhrzeit, feld)}
           onEndrundeStarten={(zeitOptionen) => endrundeStarten(offenerSpielplanTurnier, plan, zeitOptionen)}
+          onNamenSpeichern={(teamId, name) => teamNamenSpeichern(offenerSpielplanTurnier.id, teamId, name)}
           onNeuErstellen={() => spielplanNeuErstellen(offenerSpielplanTurnier)}
         />
       </div>
