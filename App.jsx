@@ -379,7 +379,8 @@ function neuesSpiel(heimId, gastId, extra) {
 }
 
 // Gruppenphase: teilt Teams gleichmäßig in N Gruppen und erzeugt Jeder-gegen-Jeden-Spiele je Gruppe.
-function erstelleGruppenplan(teamIds, anzahlGruppen) {
+// Mit mitRueckrunde=true wird jede Paarung zusätzlich mit vertauschter Heim-/Gast-Rolle als Rückspiel angelegt.
+function erstelleGruppenplan(teamIds, anzahlGruppen, mitRueckrunde) {
   const teams = mischen(teamIds);
   const gruppen = Array.from({ length: anzahlGruppen }, (_, i) => ({
     id: neueId("gruppe"),
@@ -392,16 +393,22 @@ function erstelleGruppenplan(teamIds, anzahlGruppen) {
   gruppen.forEach((g) => {
     for (let i = 0; i < g.teamIds.length; i++) {
       for (let j = i + 1; j < g.teamIds.length; j++) {
-        spiele.push(neuesSpiel(g.teamIds[i], g.teamIds[j], { gruppeId: g.id }));
+        spiele.push(neuesSpiel(g.teamIds[i], g.teamIds[j], { gruppeId: g.id, rueckspiel: false }));
+        if (mitRueckrunde) {
+          spiele.push(neuesSpiel(g.teamIds[j], g.teamIds[i], { gruppeId: g.id, rueckspiel: true }));
+        }
       }
     }
   });
 
-  return { modus: "gruppen", gruppen, spiele, runden: null };
+  return { modus: "gruppen", gruppen, spiele, runden: null, mitRueckrunde: !!mitRueckrunde };
 }
 
 // K.o.-System: baut einen Baum mit Runden; nicht besetzte Plätze (bei ungerader Teamzahl) sind Freilose.
-function erstelleKoPlan(teamIds) {
+// Mit spielUmPlatz3=true wird zusätzlich ein Spiel um Platz 3 angelegt, das automatisch mit den
+// Verlierern der Halbfinal-Spiele befüllt wird, sobald diese feststehen.
+function erstelleKoPlan(teamIds, optionen) {
+  const spielUmPlatz3 = optionen?.spielUmPlatz3 || false;
   const teams = mischen(teamIds);
   const n = teams.length;
   let groesse = 1;
@@ -438,7 +445,77 @@ function erstelleKoPlan(teamIds) {
     }
   });
 
-  return { modus: "ko", gruppen: null, spiele: null, runden };
+  // Spiel um Platz 3 nur sinnvoll, wenn es tatsächlich ein Halbfinale gibt (mind. 4 Teams).
+  const platz3Spiel = spielUmPlatz3 && runden.length >= 2 ? neuesSpiel(null, null, {}) : null;
+
+  return { modus: "ko", gruppen: null, spiele: null, runden, platz3Spiel };
+}
+
+// Addiert Minuten zu einer "HH:MM"-Uhrzeit (mit Tagesüberlauf).
+function addMinuten(basiszeit, minuten) {
+  const [h, m] = (basiszeit || "09:00").split(":").map(Number);
+  const gesamt = (h * 60 + m + minuten + 1440 * 10) % 1440; // +10 Tage als Sicherheit gegen negative Werte
+  const hh = Math.floor(gesamt / 60);
+  const mm = gesamt % 60;
+  return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+}
+
+// Kernfunktion: verteilt Uhrzeit + Feld auf eine flache Liste von Spielen (mutiert sie direkt),
+// bevorzugt pro "Zeitrunde" Paarungen, bei denen beide Teams seit mind. einer Runde pausiert haben.
+function zeitenZuweisenAnListe(spiele, optionen) {
+  const { startzeit, spieldauerMin, anzahlFelder } = optionen;
+  const letzteRunde = {};
+  let rundenIndex = 0;
+  const unassigned = [...spiele];
+
+  while (unassigned.length > 0) {
+    const belegteTeams = new Set();
+    let feldZaehler = 0;
+    let inDieserRundeVergeben = false;
+
+    while (feldZaehler < anzahlFelder && unassigned.length > 0) {
+      let index = unassigned.findIndex((s) => {
+        if (belegteTeams.has(s.heimId) || belegteTeams.has(s.gastId)) return false;
+        const hLetzte = letzteRunde[s.heimId] ?? -2;
+        const gLetzte = letzteRunde[s.gastId] ?? -2;
+        return hLetzte < rundenIndex - 1 && gLetzte < rundenIndex - 1;
+      });
+      if (index === -1) {
+        index = unassigned.findIndex((s) => !belegteTeams.has(s.heimId) && !belegteTeams.has(s.gastId));
+      }
+      if (index === -1) break;
+
+      const spiel = unassigned.splice(index, 1)[0];
+      belegteTeams.add(spiel.heimId);
+      belegteTeams.add(spiel.gastId);
+      letzteRunde[spiel.heimId] = rundenIndex;
+      letzteRunde[spiel.gastId] = rundenIndex;
+      spiel.feld = feldZaehler + 1;
+      spiel.uhrzeit = addMinuten(startzeit, rundenIndex * spieldauerMin);
+      feldZaehler++;
+      inDieserRundeVergeben = true;
+    }
+
+    if (!inDieserRundeVergeben) break; // Sicherheitsbremse gegen Endlosschleife
+    rundenIndex++;
+  }
+}
+
+// Verteilt Uhrzeit + Feld auf alle Spiele eines Plans, bei denen die Teams schon feststehen
+// (bei Gruppenspielen alle, bei K.o. nur Runde 1 - spätere Runden stehen ja erst nach den
+// Ergebnissen fest und werden beim Start der Endrunde separat verplant).
+function planMitZeitenUndFeldern(plan, optionen) {
+  const neu = JSON.parse(JSON.stringify(plan));
+
+  const planbareSpiele = [];
+  if (neu.spiele) {
+    neu.spiele.forEach((s) => { if (s.heimId && s.gastId) planbareSpiele.push(s); });
+  } else if (neu.runden) {
+    (neu.runden[0] || []).forEach((s) => { if (s.heimId && s.gastId && !s.freilos) planbareSpiele.push(s); });
+  }
+
+  zeitenZuweisenAnListe(planbareSpiele, optionen);
+  return neu;
 }
 
 // Rechnet aus den Spielergebnissen die Tabelle einer Gruppe (Punkte, Tordifferenz, geschossene Tore).
@@ -472,29 +549,65 @@ function berechneTabelle(gruppe, spiele) {
 function spielplanMitErgebnis(plan, spielId, heimTore, gastTore, siegerBeiUnentschieden) {
   const neu = JSON.parse(JSON.stringify(plan));
 
-  if (neu.modus === "gruppen") {
+  // Gruppenspiel? (gilt für reine Gruppenphase und die Gruppenphase von "Gruppe + K.o.-Endrunde")
+  if (neu.spiele) {
     const s = neu.spiele.find((sp) => sp.id === spielId);
-    if (s) { s.heimTore = heimTore; s.gastTore = gastTore; }
+    if (s) { s.heimTore = heimTore; s.gastTore = gastTore; return neu; }
+  }
+
+  // Spiel um Platz 3? Hat keine Folgerunde, einfach nur Ergebnis + Sieger eintragen.
+  if (neu.platz3Spiel && neu.platz3Spiel.id === spielId) {
+    neu.platz3Spiel.heimTore = heimTore;
+    neu.platz3Spiel.gastTore = gastTore;
+    if (heimTore > gastTore) neu.platz3Spiel.sieger = neu.platz3Spiel.heimId;
+    else if (gastTore > heimTore) neu.platz3Spiel.sieger = neu.platz3Spiel.gastId;
+    else neu.platz3Spiel.sieger = siegerBeiUnentschieden || null;
     return neu;
   }
 
-  // K.o.: Runde und Index des Spiels finden
-  for (let r = 0; r < neu.runden.length; r++) {
-    const idx = neu.runden[r].findIndex((sp) => sp.id === spielId);
-    if (idx === -1) continue;
-    const spiel = neu.runden[r][idx];
-    spiel.heimTore = heimTore;
-    spiel.gastTore = gastTore;
-    if (heimTore > gastTore) spiel.sieger = spiel.heimId;
-    else if (gastTore > heimTore) spiel.sieger = spiel.gastId;
-    else spiel.sieger = siegerBeiUnentschieden || null;
+  // K.o.-Runde: Runde und Index des Spiels finden
+  if (neu.runden) {
+    for (let r = 0; r < neu.runden.length; r++) {
+      const idx = neu.runden[r].findIndex((sp) => sp.id === spielId);
+      if (idx === -1) continue;
+      const spiel = neu.runden[r][idx];
+      spiel.heimTore = heimTore;
+      spiel.gastTore = gastTore;
+      if (heimTore > gastTore) spiel.sieger = spiel.heimId;
+      else if (gastTore > heimTore) spiel.sieger = spiel.gastId;
+      else spiel.sieger = siegerBeiUnentschieden || null;
 
-    if (spiel.sieger && neu.runden[r + 1]) {
-      const naechsteIdx = Math.floor(idx / 2);
-      const feld = idx % 2 === 0 ? "heimId" : "gastId";
-      neu.runden[r + 1][naechsteIdx][feld] = spiel.sieger;
+      if (spiel.sieger && neu.runden[r + 1]) {
+        const naechsteIdx = Math.floor(idx / 2);
+        const feld = idx % 2 === 0 ? "heimId" : "gastId";
+        neu.runden[r + 1][naechsteIdx][feld] = spiel.sieger;
+      }
+      // Halbfinale mit "Spiel um Platz 3"? Verlierer automatisch dort eintragen.
+      if (neu.platz3Spiel && r === neu.runden.length - 2 && spiel.sieger) {
+        const verlierer = spiel.sieger === spiel.heimId ? spiel.gastId : spiel.heimId;
+        const zielFeld = idx % 2 === 0 ? "heimId" : "gastId";
+        neu.platz3Spiel[zielFeld] = verlierer;
+      }
+      break;
     }
-    break;
+  }
+  return neu;
+}
+
+// Manuelle Verschiebung von Uhrzeit/Feld eines einzelnen Spiels - z. B. wenn sich das Turnier
+// verzögert. Ändert nur dieses eine Spiel; über den bestehenden 20-Sekunden-Live-Abgleich sehen
+// alle anderen Geräte die neue Zeit automatisch, genau wie bei Ergebnissen.
+function spielplanMitZeit(plan, spielId, uhrzeit, feld) {
+  const neu = JSON.parse(JSON.stringify(plan));
+  const alleSpiele = [
+    ...(neu.spiele || []),
+    ...(neu.runden ? neu.runden.flat() : []),
+    ...(neu.platz3Spiel ? [neu.platz3Spiel] : []),
+  ];
+  const s = alleSpiele.find((sp) => sp.id === spielId);
+  if (s) {
+    s.uhrzeit = uhrzeit || null;
+    s.feld = feld || null;
   }
   return neu;
 }
@@ -527,7 +640,7 @@ function spielplanAlsPdfHerunterladen(plan, teams, turnier) {
   doc.setTextColor(0, 0, 0);
   y += 10;
 
-  if (plan.modus === "gruppen") {
+  if (plan.gruppen) {
     plan.gruppen.forEach((g) => {
       neueZeilePruefen(10);
       doc.setFontSize(13);
@@ -561,12 +674,21 @@ function spielplanAlsPdfHerunterladen(plan, teams, turnier) {
       spieleDerGruppe.forEach((s) => {
         neueZeilePruefen();
         const ergebnis = s.heimTore !== null && s.gastTore !== null ? `${s.heimTore} : ${s.gastTore}` : "– : –";
-        doc.text(`${teamName(s.heimId)}  ${ergebnis}  ${teamName(s.gastId)}`, 14, y);
+        const zeitFeld = s.uhrzeit ? `${s.uhrzeit} Uhr${s.feld ? ` (Feld ${s.feld})` : ""}  ·  ` : "";
+        const rueck = s.rueckspiel ? "  (Rückspiel)" : "";
+        doc.text(`${zeitFeld}${teamName(s.heimId)}  ${ergebnis}  ${teamName(s.gastId)}${rueck}`, 14, y);
         y += 5.5;
       });
       y += 6;
     });
-  } else {
+  }
+  if (plan.runden) {
+    if (plan.gruppen) {
+      neueZeilePruefen(12);
+      doc.setFontSize(15);
+      doc.text("K.o.-Endrunde", 14, y);
+      y += 9;
+    }
     plan.runden.forEach((runde, i) => {
       neueZeilePruefen(10);
       const titel = i === plan.runden.length - 1 ? "Finale" : i === plan.runden.length - 2 ? "Halbfinale" : `Runde ${i + 1}`;
@@ -580,12 +702,25 @@ function spielplanAlsPdfHerunterladen(plan, teams, turnier) {
           doc.text(`${teamName(s.heimId)}  –  Freilos`, 14, y);
         } else {
           const ergebnis = s.heimTore !== null && s.gastTore !== null ? `${s.heimTore} : ${s.gastTore}` : "– : –";
-          doc.text(`${teamName(s.heimId)}  ${ergebnis}  ${teamName(s.gastId)}`, 14, y);
+          const zeitFeld = s.uhrzeit ? `${s.uhrzeit} Uhr${s.feld ? ` (Feld ${s.feld})` : ""}  ·  ` : "";
+          doc.text(`${zeitFeld}${teamName(s.heimId)}  ${ergebnis}  ${teamName(s.gastId)}`, 14, y);
         }
         y += 5.5;
       });
       y += 6;
     });
+    if (plan.platz3Spiel) {
+      neueZeilePruefen(10);
+      doc.setFontSize(13);
+      doc.text("Spiel um Platz 3", 14, y);
+      y += 7;
+      doc.setFontSize(9);
+      const s = plan.platz3Spiel;
+      const ergebnis = s.heimTore !== null && s.gastTore !== null ? `${s.heimTore} : ${s.gastTore}` : "– : –";
+      const zeitFeld = s.uhrzeit ? `${s.uhrzeit} Uhr${s.feld ? ` (Feld ${s.feld})` : ""}  ·  ` : "";
+      doc.text(`${zeitFeld}${teamName(s.heimId)}  ${ergebnis}  ${teamName(s.gastId)}`, 14, y);
+      y += 6;
+    }
   }
 
   doc.save(`spielplan-${turnier.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.pdf`);
@@ -1058,10 +1193,23 @@ function anmeldungZuDb(a) {
 }
 
 function spielplanAusDb(p) {
-  return { id: p.id, turnierId: p.turnier_id, modus: p.modus, gruppen: p.gruppen, spiele: p.spiele, runden: p.runden, erstelltAm: p.erstellt_am };
+  return {
+    id: p.id, turnierId: p.turnier_id, modus: p.modus, gruppen: p.gruppen, spiele: p.spiele, runden: p.runden,
+    erstelltAm: p.erstellt_am,
+    platz3Spiel: p.platz3spiel || null,
+    mitRueckrunde: !!p.mit_rueckrunde,
+    qualifiziertProGruppe: p.qualifiziert_pro_gruppe || null,
+    spielUmPlatz3Wunsch: !!p.spiel_um_platz3_wunsch,
+  };
 }
 function spielplanZuDb(p) {
-  return { id: p.id, turnier_id: p.turnierId, modus: p.modus, gruppen: p.gruppen || null, spiele: p.spiele || null, runden: p.runden || null };
+  return {
+    id: p.id, turnier_id: p.turnierId, modus: p.modus, gruppen: p.gruppen || null, spiele: p.spiele || null, runden: p.runden || null,
+    platz3spiel: p.platz3Spiel || null,
+    mit_rueckrunde: !!p.mitRueckrunde,
+    qualifiziert_pro_gruppe: p.qualifiziertProGruppe || null,
+    spiel_um_platz3_wunsch: !!p.spielUmPlatz3Wunsch,
+  };
 }
 
 function dokumentAusDb(d) {
@@ -2154,14 +2302,14 @@ function AnmeldeStatusKarte({ anmeldung, turnier, jetzt, alsBezahltMelden, fotoE
 
 // Zeigt einen Spielplan (Gruppenphase oder K.o.) an. Im bearbeitbaren Modus können Ergebnisse
 // eingetragen werden; sonst ist es eine reine Lese-Ansicht für Teilnehmer.
-function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern }) {
+function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern, onZeitSpeichern }) {
   const teamName = (id) => {
     if (!id) return "Freilos";
     const t = teams.find((a) => a.id === id);
     return t ? t.verein : "–";
   };
 
-  const inhalt = plan.modus === "gruppen" ? (
+  const gruppenBlock = plan.gruppen ? (
     <div className="kc-spielplan">
       {plan.gruppen.map((g) => {
         const tabelle = berechneTabelle(g, plan.spiele);
@@ -2189,15 +2337,16 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern 
             </table>
             <div className="kc-spiele-liste">
               {spieleDerGruppe.map((s) => (
-                <SpielZeile key={s.id} spiel={s} teamName={teamName} bearbeitbar={bearbeitbar} onSpeichern={onSpielSpeichern} />
+                <SpielZeile key={s.id} spiel={s} teamName={teamName} bearbeitbar={bearbeitbar} onSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} />
               ))}
             </div>
           </div>
         );
       })}
     </div>
-  ) : (
-    // K.o.-System
+  ) : null;
+
+  const koBlock = plan.runden ? (
     <div className="kc-spielplan">
       {plan.runden.map((runde, i) => (
         <div className="kc-runde-block" key={i}>
@@ -2206,13 +2355,21 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern 
           </h3>
           <div className="kc-spiele-liste">
             {runde.map((s) => (
-              <SpielZeile key={s.id} spiel={s} teamName={teamName} bearbeitbar={bearbeitbar && !s.freilos} onSpeichern={onSpielSpeichern} zeigeSieger />
+              <SpielZeile key={s.id} spiel={s} teamName={teamName} bearbeitbar={bearbeitbar && !s.freilos} onSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} zeigeSieger />
             ))}
           </div>
         </div>
       ))}
+      {plan.platz3Spiel && (
+        <div className="kc-runde-block">
+          <h3 className="kc-h3">Spiel um Platz 3</h3>
+          <div className="kc-spiele-liste">
+            <SpielZeile spiel={plan.platz3Spiel} teamName={teamName} bearbeitbar={bearbeitbar} onSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} zeigeSieger />
+          </div>
+        </div>
+      )}
     </div>
-  );
+  ) : null;
 
   return (
     <div>
@@ -2223,15 +2380,27 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern 
           </button>
         </div>
       )}
-      {inhalt}
+      {gruppenBlock}
+      {plan.modus === "gruppen_ko" && !plan.runden && (
+        <p className="kc-hinweis" style={{ margin: "10px 0" }}>
+          Die K.o.-Endrunde ist noch nicht gestartet – das kann der Veranstalter tun, sobald alle Gruppenspiele feststehen.
+        </p>
+      )}
+      {plan.modus === "gruppen_ko" && plan.runden && (
+        <h3 className="kc-h3" style={{ marginTop: "18px" }}>K.o.-Endrunde</h3>
+      )}
+      {koBlock}
     </div>
   );
 }
 
-function SpielZeile({ spiel, teamName, bearbeitbar, onSpeichern, zeigeSieger }) {
+function SpielZeile({ spiel, teamName, bearbeitbar, onSpeichern, onZeitSpeichern, zeigeSieger }) {
   const [heim, setHeim] = useState(spiel.heimTore ?? "");
   const [gast, setGast] = useState(spiel.gastTore ?? "");
   const [siegerWahl, setSiegerWahl] = useState("");
+  const [zeitBearbeiten, setZeitBearbeiten] = useState(false);
+  const [uhrzeitEingabe, setUhrzeitEingabe] = useState(spiel.uhrzeit || "");
+  const [feldEingabe, setFeldEingabe] = useState(spiel.feld || "");
   const hatErgebnis = spiel.heimTore !== null && spiel.gastTore !== null;
   const wartetAufTeams = !spiel.heimId || !spiel.gastId;
 
@@ -2250,8 +2419,36 @@ function SpielZeile({ spiel, teamName, bearbeitbar, onSpeichern, zeigeSieger }) 
     onSpeichern(spiel.id, h, g, siegerWahl || null);
   };
 
+  const zeitSpeichern = () => {
+    onZeitSpeichern(spiel.id, uhrzeitEingabe || null, feldEingabe ? Number(feldEingabe) : null);
+    setZeitBearbeiten(false);
+  };
+
   return (
     <div className="kc-spiel-zeile">
+      {bearbeitbar && onZeitSpeichern && zeitBearbeiten ? (
+        <div className="kc-spiel-zeit-bearbeiten">
+          <input className="kc-input kc-input--klein" type="time" value={uhrzeitEingabe} onChange={(e) => setUhrzeitEingabe(e.target.value)} />
+          <input className="kc-input kc-input--klein" type="number" min="1" placeholder="Feld" value={feldEingabe} onChange={(e) => setFeldEingabe(e.target.value)} style={{ width: "60px" }} />
+          <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={zeitSpeichern}>✓</button>
+          <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => setZeitBearbeiten(false)}>✕</button>
+        </div>
+      ) : (
+        <span className="kc-spiel-meta">
+          {spiel.rueckspiel ? "🔁 Rückspiel  " : ""}
+          {spiel.uhrzeit ? `🕐 ${spiel.uhrzeit} Uhr${spiel.feld ? ` · Feld ${spiel.feld}` : ""}` : bearbeitbar && onZeitSpeichern ? "Uhrzeit/Feld noch nicht festgelegt" : ""}
+          {bearbeitbar && onZeitSpeichern && (
+            <button
+              type="button"
+              className="kc-inline-link"
+              style={{ marginLeft: "8px", fontSize: "11.5px" }}
+              onClick={() => { setUhrzeitEingabe(spiel.uhrzeit || ""); setFeldEingabe(spiel.feld || ""); setZeitBearbeiten(true); }}
+            >
+              {spiel.uhrzeit ? "ändern" : "festlegen"}
+            </button>
+          )}
+        </span>
+      )}
       <span className={zeigeSieger && spiel.sieger === spiel.heimId ? "kc-team-sieger" : ""}>{teamName(spiel.heimId)}</span>
       {bearbeitbar && !wartetAufTeams ? (
         <div className="kc-spiel-eingabe">
@@ -2280,9 +2477,15 @@ function SpielZeile({ spiel, teamName, bearbeitbar, onSpeichern, zeigeSieger }) 
 }
 
 // Erstellungs-Dialog: Modus frei wählbar (Gruppenphase oder K.o.-System), inkl. Anzahl Gruppen.
-function SpielplanErstellen({ bestaetigteTeams, onErstellen }) {
+function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
   const [modus, setModus] = useState("gruppen");
   const [anzahlGruppen, setAnzahlGruppen] = useState(2);
+  const [mitRueckrunde, setMitRueckrunde] = useState(false);
+  const [spielUmPlatz3, setSpielUmPlatz3] = useState(false);
+  const [qualifiziertProGruppe, setQualifiziertProGruppe] = useState(2);
+  const [startzeit, setStartzeit] = useState(turnier?.uhrzeit || "09:00");
+  const [spieldauerMin, setSpieldauerMin] = useState(20);
+  const [anzahlFelder, setAnzahlFelder] = useState(1);
   const anzahlTeams = bestaetigteTeams.length;
   const zuWenigTeams = anzahlTeams < 2;
 
@@ -2298,10 +2501,11 @@ function SpielplanErstellen({ bestaetigteTeams, onErstellen }) {
             <span>Turnierformat</span>
             <select className="kc-input" value={modus} onChange={(e) => setModus(e.target.value)}>
               <option value="gruppen">Gruppenphase (jeder gegen jeden)</option>
+              <option value="gruppen_ko">Gruppenphase + anschließende K.o.-Endrunde</option>
               <option value="ko">K.o.-System</option>
             </select>
           </label>
-          {modus === "gruppen" && (
+          {(modus === "gruppen" || modus === "gruppen_ko") && (
             <label className="kc-feld">
               <span>Anzahl Gruppen</span>
               <input
@@ -2314,9 +2518,58 @@ function SpielplanErstellen({ bestaetigteTeams, onErstellen }) {
               />
             </label>
           )}
+          {(modus === "gruppen" || modus === "gruppen_ko") && (
+            <label className="kc-checkbox-zeile">
+              <input type="checkbox" checked={mitRueckrunde} onChange={(e) => setMitRueckrunde(e.target.checked)} />
+              <span>Mit Rückrunde (jede Mannschaft spielt zweimal gegeneinander – Hin- und Rückspiel)</span>
+            </label>
+          )}
+          {modus === "gruppen_ko" && (
+            <label className="kc-feld">
+              <span>Wie viele Mannschaften kommen pro Gruppe weiter?</span>
+              <input
+                className="kc-input"
+                type="number"
+                min="1"
+                max={Math.max(1, Math.floor(anzahlTeams / anzahlGruppen))}
+                value={qualifiziertProGruppe}
+                onChange={(e) => setQualifiziertProGruppe(Number(e.target.value))}
+              />
+              <span className="kc-notiz">Die K.o.-Endrunde selbst wird erst gestartet, sobald alle Gruppenspiele feststehen.</span>
+            </label>
+          )}
+          {(modus === "ko" || modus === "gruppen_ko") && (
+            <label className="kc-checkbox-zeile">
+              <input type="checkbox" checked={spielUmPlatz3} onChange={(e) => setSpielUmPlatz3(e.target.checked)} />
+              <span>Spiel um Platz 3 (zwischen den beiden Halbfinal-Verlierern)</span>
+            </label>
+          )}
+          <div className="kc-feld-reihe">
+            <label className="kc-feld">
+              <span>Startzeit</span>
+              <input className="kc-input" type="time" value={startzeit} onChange={(e) => setStartzeit(e.target.value)} />
+            </label>
+            <label className="kc-feld">
+              <span>Spieldauer je Spiel (Minuten)</span>
+              <input className="kc-input" type="number" min="5" step="5" value={spieldauerMin} onChange={(e) => setSpieldauerMin(Number(e.target.value))} />
+            </label>
+          </div>
+          <label className="kc-feld">
+            <span>Anzahl Felder/Plätze</span>
+            <input className="kc-input" type="number" min="1" max="10" value={anzahlFelder} onChange={(e) => setAnzahlFelder(Number(e.target.value))} />
+          </label>
+          <p className="kc-notiz">
+            Uhrzeit und Feld werden automatisch verteilt – nach Möglichkeit mit mindestens einer Spielrunde Pause pro Mannschaft.
+            {modus === "gruppen_ko" && " Das gilt zunächst nur für die Gruppenphase, die Endrunden-Zeiten fragen wir separat ab, sobald du sie startest."}
+          </p>
           <button
             className="kc-btn kc-btn--primary"
-            onClick={() => onErstellen(modus, modus === "gruppen" ? anzahlGruppen : null)}
+            onClick={() => onErstellen(
+              modus,
+              modus === "gruppen" || modus === "gruppen_ko" ? anzahlGruppen : null,
+              { startzeit, spieldauerMin, anzahlFelder },
+              { mitRueckrunde, spielUmPlatz3, qualifiziertProGruppe }
+            )}
           >
             Spielplan erstellen
           </button>
@@ -2326,16 +2579,55 @@ function SpielplanErstellen({ bestaetigteTeams, onErstellen }) {
   );
 }
 
-function SpielplanVerwaltung({ turnier, anmeldungen, plan, onErstellen, onSpielSpeichern, onNeuErstellen }) {
+// Kleines Extra-Formular: startet die K.o.-Endrunde einer "Gruppe + Endrunde"-Kombination,
+// sobald die Gruppenphase abgeschlossen ist. Fragt eigene Startzeit/Spieldauer/Felder ab, da die
+// Endrunde meist zu einem späteren Zeitpunkt am Turniertag beginnt.
+function EndrundeStarten({ onEndrundeStarten, turnier }) {
+  const [startzeit, setStartzeit] = useState(turnier?.uhrzeit || "13:00");
+  const [spieldauerMin, setSpieldauerMin] = useState(20);
+  const [anzahlFelder, setAnzahlFelder] = useState(1);
+
+  return (
+    <div className="kc-section kc-formular-karte" style={{ marginTop: "16px" }}>
+      <h2 className="kc-h2">K.o.-Endrunde starten</h2>
+      <p className="kc-sub">
+        Ermittelt automatisch die besten Mannschaften je Gruppe (nach aktueller Tabelle) und baut
+        daraus die Endrunde. Am besten erst starten, wenn alle Gruppenspiele feststehen.
+      </p>
+      <div className="kc-formular">
+        <div className="kc-feld-reihe">
+          <label className="kc-feld">
+            <span>Startzeit der Endrunde</span>
+            <input className="kc-input" type="time" value={startzeit} onChange={(e) => setStartzeit(e.target.value)} />
+          </label>
+          <label className="kc-feld">
+            <span>Spieldauer je Spiel (Minuten)</span>
+            <input className="kc-input" type="number" min="5" step="5" value={spieldauerMin} onChange={(e) => setSpieldauerMin(Number(e.target.value))} />
+          </label>
+        </div>
+        <label className="kc-feld">
+          <span>Anzahl Felder/Plätze</span>
+          <input className="kc-input" type="number" min="1" max="10" value={anzahlFelder} onChange={(e) => setAnzahlFelder(Number(e.target.value))} />
+        </label>
+        <button className="kc-btn kc-btn--primary" onClick={() => onEndrundeStarten({ startzeit, spieldauerMin, anzahlFelder })}>
+          Endrunde jetzt auslosen &amp; starten
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SpielplanVerwaltung({ turnier, anmeldungen, plan, onErstellen, onSpielSpeichern, onZeitSpeichern, onEndrundeStarten, onNeuErstellen }) {
   const bestaetigteTeams = anmeldungen.filter((a) => a.turnierId === turnier.id && a.status === "bestaetigt");
   const spielplanLink = `${window.location.origin}${window.location.pathname}?turnier=${encodeURIComponent(turnier.id)}&ansicht=spielplan`;
   const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(spielplanLink)}`;
+  const endrundeAusstehend = plan && plan.modus === "gruppen_ko" && !plan.runden;
 
   return (
     <div className="kc-section">
       <h2 className="kc-h2">Spielplan: {turnier.name}</h2>
       {!plan ? (
-        <SpielplanErstellen bestaetigteTeams={bestaetigteTeams} onErstellen={onErstellen} />
+        <SpielplanErstellen bestaetigteTeams={bestaetigteTeams} turnier={turnier} onErstellen={onErstellen} />
       ) : (
         <>
           <div className="kc-admin-aktionen">
@@ -2352,7 +2644,9 @@ function SpielplanVerwaltung({ turnier, anmeldungen, plan, onErstellen, onSpielS
             </div>
           </div>
 
-          <SpielplanAnzeige plan={plan} teams={anmeldungen} turnier={turnier} bearbeitbar onSpielSpeichern={onSpielSpeichern} />
+          <SpielplanAnzeige plan={plan} teams={anmeldungen} turnier={turnier} bearbeitbar onSpielSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} />
+
+          {endrundeAusstehend && <EndrundeStarten onEndrundeStarten={onEndrundeStarten} turnier={turnier} />}
         </>
       )}
     </div>
@@ -2842,15 +3136,50 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     belegungNeuLaden();
   };
 
-  const spielplanErstellen = async (turnier, modus, anzahlGruppen) => {
+  const spielplanErstellen = async (turnier, modus, anzahlGruppen, zeitOptionen, zusatzOptionen) => {
     const bestaetigteIds = anmeldungen
       .filter((a) => a.turnierId === turnier.id && a.status === "bestaetigt")
       .map((a) => a.id);
-    const neuerPlan = modus === "gruppen" ? erstelleGruppenplan(bestaetigteIds, anzahlGruppen) : erstelleKoPlan(bestaetigteIds);
+    const { mitRueckrunde, spielUmPlatz3, qualifiziertProGruppe } = zusatzOptionen || {};
+
+    let neuerPlan;
+    if (modus === "gruppen" || modus === "gruppen_ko") {
+      neuerPlan = erstelleGruppenplan(bestaetigteIds, anzahlGruppen, mitRueckrunde);
+      if (modus === "gruppen_ko") {
+        neuerPlan.modus = "gruppen_ko";
+        neuerPlan.qualifiziertProGruppe = qualifiziertProGruppe || 2;
+        neuerPlan.spielUmPlatz3Wunsch = !!spielUmPlatz3;
+      }
+    } else {
+      neuerPlan = erstelleKoPlan(bestaetigteIds, { spielUmPlatz3 });
+    }
+    if (zeitOptionen) neuerPlan = planMitZeitenUndFeldern(neuerPlan, zeitOptionen);
     await supabaseDeleteWhere("spielplaene", `?turnier_id=eq.${turnier.id}`, session.access_token);
     const roh = { id: neueId("plan"), turnierId: turnier.id, erstelltAm: Date.now(), ...neuerPlan };
     const zeile = await supabaseInsert("spielplaene", spielplanZuDb(roh), session.access_token);
     setSpielplaene((prev) => [...prev.filter((p) => p.turnierId !== turnier.id), spielplanAusDb(zeile[0])]);
+  };
+
+  // Startet die K.o.-Endrunde einer "Gruppe + Endrunde"-Kombination: ermittelt die besten N Teams
+  // je Gruppe (nach Tabelle) und baut daraus einen frischen K.o.-Baum, der an die bestehende
+  // Gruppenphase angehängt wird - die Gruppendaten selbst bleiben dabei vollständig erhalten.
+  const endrundeStarten = async (turnier, plan, zeitOptionen) => {
+    const proGruppeQualifiziert = plan.gruppen.flatMap((g) => {
+      const tabelle = berechneTabelle(g, plan.spiele);
+      return tabelle.slice(0, plan.qualifiziertProGruppe || 2).map((r) => r.teamId);
+    });
+    if (proGruppeQualifiziert.length < 2) {
+      alert("Zu wenige qualifizierte Mannschaften für eine Endrunde.");
+      return;
+    }
+    const koTeil = erstelleKoPlan(proGruppeQualifiziert, { spielUmPlatz3: plan.spielUmPlatz3Wunsch });
+    if (zeitOptionen) {
+      const planbar = (koTeil.runden[0] || []).filter((s) => s.heimId && s.gastId && !s.freilos);
+      zeitenZuweisenAnListe(planbar, zeitOptionen);
+    }
+    const aktualisiert = { ...plan, runden: koTeil.runden, platz3Spiel: koTeil.platz3Spiel };
+    const zeile = await supabaseUpdate("spielplaene", plan.id, spielplanZuDb(aktualisiert), session.access_token);
+    setSpielplaene((prev) => prev.map((p) => (p.id === plan.id ? spielplanAusDb(zeile[0]) : p)));
   };
 
   const spielplanNeuErstellen = async (turnier) => {
@@ -2863,6 +3192,16 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     const plan = spielplaene.find((p) => p.turnierId === turnierId);
     if (!plan) return;
     const aktualisiert = spielplanMitErgebnis(plan, spielId, heimTore, gastTore, siegerBeiUnentschieden);
+    const zeile = await supabaseUpdate("spielplaene", plan.id, spielplanZuDb(aktualisiert), session.access_token);
+    setSpielplaene((prev) => prev.map((p) => (p.id === plan.id ? spielplanAusDb(zeile[0]) : p)));
+  };
+
+  // Manuelle Anpassung von Uhrzeit/Feld - z. B. bei Verzögerungen am Turniertag. Über den
+  // bestehenden Live-Abgleich sehen alle anderen Geräte die neue Zeit automatisch nach.
+  const zeitSpeichern = async (turnierId, spielId, uhrzeit, feld) => {
+    const plan = spielplaene.find((p) => p.turnierId === turnierId);
+    if (!plan) return;
+    const aktualisiert = spielplanMitZeit(plan, spielId, uhrzeit, feld);
     const zeile = await supabaseUpdate("spielplaene", plan.id, spielplanZuDb(aktualisiert), session.access_token);
     setSpielplaene((prev) => prev.map((p) => (p.id === plan.id ? spielplanAusDb(zeile[0]) : p)));
   };
@@ -2929,8 +3268,10 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
           turnier={offenerSpielplanTurnier}
           anmeldungen={anmeldungen}
           plan={plan}
-          onErstellen={(modus, anzahlGruppen) => spielplanErstellen(offenerSpielplanTurnier, modus, anzahlGruppen)}
+          onErstellen={(modus, anzahlGruppen, zeitOptionen, zusatzOptionen) => spielplanErstellen(offenerSpielplanTurnier, modus, anzahlGruppen, zeitOptionen, zusatzOptionen)}
           onSpielSpeichern={(spielId, h, g, sieger) => spielSpeichern(offenerSpielplanTurnier.id, spielId, h, g, sieger)}
+          onZeitSpeichern={(spielId, uhrzeit, feld) => zeitSpeichern(offenerSpielplanTurnier.id, spielId, uhrzeit, feld)}
+          onEndrundeStarten={(zeitOptionen) => endrundeStarten(offenerSpielplanTurnier, plan, zeitOptionen)}
           onNeuErstellen={() => spielplanNeuErstellen(offenerSpielplanTurnier)}
         />
       </div>
@@ -4168,6 +4509,8 @@ const CSS = `
 
 .kc-spiele-liste { display: flex; flex-direction: column; gap: 8px; }
 .kc-spiel-zeile { display: flex; align-items: center; gap: 8px; font-size: 13.5px; background: #F8FAF7; border-radius: 7px; padding: 8px 10px; flex-wrap: wrap; }
+.kc-spiel-meta { flex-basis: 100%; font-size: 11.5px; color: var(--kc-muted); font-weight: 600; }
+.kc-spiel-zeit-bearbeiten { flex-basis: 100%; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .kc-spiel-zeile > span:first-child, .kc-spiel-zeile > span:nth-child(3) { flex: 1; min-width: 90px; }
 .kc-spiel-zeile--freilos { color: var(--kc-muted); font-style: italic; }
 .kc-spiel-ergebnis { font-weight: 700; min-width: 48px; text-align: center; }
