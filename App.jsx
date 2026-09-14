@@ -3083,6 +3083,9 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                         )}
                         {st === "ausstehend" && (
                           <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+                            <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "bestaetigt")}>
+                              ✅ Direkt bestätigen (bereits bezahlt)
+                            </button>
                             <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => erinnerungSenden(a)}>
                               ✉️ Erinnerung senden
                             </button>
@@ -3141,6 +3144,9 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                         )}
                         {st === "ausstehend" && (
                           <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+                            <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "bestaetigt")}>
+                              ✅ Direkt bestätigen (bereits bezahlt)
+                            </button>
                             <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => erinnerungSenden(a)}>
                               ✉️ Erinnerung senden
                             </button>
