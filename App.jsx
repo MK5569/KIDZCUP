@@ -2988,7 +2988,9 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
           const aktiveRegs = regsFuerTurnier.filter((a) => effektiverStatus(a, jetzt) !== "warteliste");
           // Neu eingegangene, noch unbearbeitete Anmeldungen zuerst - die brauchen deine Aufmerksamkeit am dringendsten.
           const neueRegs = aktiveRegs.filter((a) => effektiverStatus(a, jetzt) === "eingegangen");
-          const bearbeiteteRegs = aktiveRegs.filter((a) => effektiverStatus(a, jetzt) !== "eingegangen");
+          const bestaetigteRegs = aktiveRegs.filter((a) => effektiverStatus(a, jetzt) === "bestaetigt");
+          const bearbeiteteRegs = aktiveRegs.filter((a) => !["eingegangen", "bestaetigt"].includes(effektiverStatus(a, jetzt)));
+          const anzahlInBearbeitung = neueRegs.length + bearbeiteteRegs.filter((a) => ["ausstehend", "zahlung_gemeldet"].includes(effektiverStatus(a, jetzt))).length;
           const belegt = belegtePlaetze(t.id);
           const frei = Math.max(0, t.maxPlaetze - belegt);
           const offen = offenesTurnier === t.id;
@@ -3001,6 +3003,12 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                   <span className="kc-zahl-label">belegt{wartelisteRegs.length > 0 ? ` · ${wartelisteRegs.length} Warteliste` : ""}</span>
                 </div>
               </div>
+              {regsFuerTurnier.length > 0 && (
+                <div className="kc-status-zusammenfassung">
+                  <span className="kc-status-chip kc-status-chip--gruen">✅ {bestaetigteRegs.length} bestätigt</span>
+                  <span className="kc-status-chip kc-status-chip--gelb">⏳ {anzahlInBearbeitung} in Bearbeitung</span>
+                </div>
+              )}
               <dl className="kc-details">
                 <div><dt>Termin</dt><dd>{formatDatum(t.datum)}</dd></div>
                 <div><dt>Ort</dt><dd>{t.ort}</dd></div>
@@ -3110,9 +3118,40 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                     </div>
                   )}
 
+                  {bestaetigteRegs.length > 0 && (
+                    <div className="kc-bestaetigt-block">
+                      <h3 className="kc-h3 kc-h3--bestaetigt">✅ Bestätigt ({bestaetigteRegs.length})</h3>
+                      {bestaetigteRegs.map((a) => (
+                        <div className="kc-anmeldungs-zeile" key={a.id}>
+                          <div>
+                            <strong>{a.verein}</strong> – Jahrgang {a.jahrgang} ({a.jugend}) · Trainer: {a.trainer}
+                            <div className="kc-notiz">{a.email} · {a.telefon}</div>
+                            {a.gebuehrenfrei && <div className="kc-notiz" style={{ color: "var(--kc-green)", fontWeight: 600 }}>🆓 Gebührenfrei</div>}
+                          </div>
+                          <span className="kc-status-badge kc-status-badge--klein" style={{ background: STATUS_FARBE.bestaetigt }}>
+                            {STATUS_LABEL.bestaetigt}
+                          </span>
+                          <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+                            <a
+                              className="kc-btn kc-btn--sekundaer kc-btn--klein"
+                              href={whatsappLink(a.telefon, `Hallo ${a.trainer}, hier meldet sich KIDZCUP bezüglich eurer Anmeldung für "${t.name}".`)}
+                              target="_blank"
+                              rel="noopener"
+                            >
+                              📱 WhatsApp
+                            </a>
+                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungManuellLoeschen(a)} title="Löschung auf Anfrage, z. B. bei Auskunftsersuchen">
+                              🗑 Daten löschen
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
                   {bearbeiteteRegs.length > 0 && (
-                    <div className={neueRegs.length > 0 ? "kc-bereits-bearbeitet-block" : undefined}>
-                      {neueRegs.length > 0 && <h3 className="kc-h3">Bereits bearbeitet ({bearbeiteteRegs.length})</h3>}
+                    <div className={neueRegs.length > 0 || bestaetigteRegs.length > 0 ? "kc-bereits-bearbeitet-block" : undefined}>
+                      {(neueRegs.length > 0 || bestaetigteRegs.length > 0) && <h3 className="kc-h3">Weitere Anmeldungen ({bearbeiteteRegs.length})</h3>}
                       {bearbeiteteRegs.map((a) => {
                     const st = effektiverStatus(a, jetzt);
                     return (
@@ -3968,6 +4007,12 @@ const CSS = `
 .kc-neu-block { background: #EEF4FB; border: 1.5px solid var(--kc-blue); border-radius: 10px; padding: 10px 12px 4px; margin-bottom: 4px; display: flex; flex-direction: column; gap: 12px; }
 .kc-h3--neu { color: var(--kc-blue); margin-top: 0; }
 .kc-bereits-bearbeitet-block { margin-top: 10px; padding-top: 10px; border-top: 1px dashed #D7DED6; display: flex; flex-direction: column; gap: 12px; opacity: 0.85; }
+.kc-status-zusammenfassung { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0 0; }
+.kc-status-chip { display: inline-block; font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 999px; }
+.kc-status-chip--gruen { background: #E4F3EA; color: #1E6E3C; }
+.kc-status-chip--gelb { background: #FCF3DC; color: #7A5A00; }
+.kc-bestaetigt-block { background: #F0F8F3; border: 1.5px solid var(--kc-green); border-radius: 10px; padding: 10px 12px 4px; margin-bottom: 4px; display: flex; flex-direction: column; gap: 12px; }
+.kc-h3--bestaetigt { color: var(--kc-green); margin-top: 0; }
 
 .kc-btn--block { display: block; width: 100%; margin-top: 8px; }
 
