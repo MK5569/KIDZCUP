@@ -278,6 +278,17 @@ function mailVorlage(typ, anmeldung, turnier) {
         `Ohne fristgerechte Zahlung können wir die Teilnahme leider nicht bestätigen.\n\n${gruss}`,
     };
   }
+  if (typ === "frist_verlaengert") {
+    return {
+      betreff: `Neue Zahlungsfrist für ${turnier?.name || "euer Turnier"}`,
+      text:
+        `Hallo ${anmeldung.trainer || ""},\n\n` +
+        `eure Zahlungsfrist für die Anmeldung von ${anmeldung.verein} für "${turnier?.name}" (${termin}) wurde ` +
+        `um weitere 3 Tage verlängert. Bitte zahlt jetzt bis spätestens ${frist} die Startgebühr von ${turnier?.preis} €.\n\n` +
+        bauZahlungshinweis(anmeldung, turnier) +
+        `Ohne fristgerechte Zahlung können wir die Teilnahme leider nicht bestätigen.\n\n${gruss}`,
+    };
+  }
   if (typ === "bestaetigung") {
     const einleitung = anmeldung.gebuehrenfrei
       ? "eure Mannschaft ist von der Startgebühr befreit, ihr müsst nichts bezahlen"
@@ -2799,7 +2810,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     belegungNeuLaden();
     if (anmeldung) {
       const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
-      benachrichtigen("erinnerung", aktualisierteAnmeldung, turnier);
+      benachrichtigen("frist_verlaengert", aktualisierteAnmeldung, turnier);
     }
   };
 
