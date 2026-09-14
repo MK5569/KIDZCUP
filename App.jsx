@@ -155,12 +155,10 @@ function telefonInternational(telefon) {
   return n ? "+" + n : "";
 }
 
-// Erstellt eine vCard-Datei (.vcf) mit allen Kontakten einer Anmeldungsliste und gibt eine
-// herunterladbare Blob-URL zurück. Wird NICHT automatisch angeklickt: iOS Safari öffnet .vcf-Dateien
-// bei einem normalen Tippen immer als Schnellvorschau mit nur EINEM Kontakt, komplett am Dateisystem
-// vorbei - das lässt sich nur umgehen, wenn die Person selbst lange auf einen echten Link drückt und
-// "Datei herunterladen" wählt. Deshalb geben wir hier nur die URL zurück, die Anzeige als lang-drückbarer
-// Link erfolgt in der Admin-Ansicht.
+// Erstellt eine vCard-Datei (.vcf) mit allen Kontakten einer Anmeldungsliste. Gibt Blob + URL zurück,
+// damit die Admin-Ansicht sowohl das native Teilen-Menü (bevorzugt) als auch einen Link als Rückfalllösung
+// anbieten kann. Direktes Antippen einer .vcf-Datei in Safari zeigt auf dem iPhone unzuverlässig nur
+// einen einzelnen Kontakt - über "Teilen" → Mail/AirDrop funktioniert der Mehrfach-Import zuverlässig.
 function vcardFeldEscape(text) {
   return String(text || "").replace(/\\/g, "\\\\").replace(/,/g, "\\,").replace(/;/g, "\\;");
 }
@@ -187,11 +185,9 @@ function kontakteVcfVorbereiten(turnier, liste) {
 
   if (karten.length === 0) return null;
 
+  const dateiname = `kontakte-${turnier.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.vcf`;
   const blob = new Blob([karten.join("\r\n") + "\r\n"], { type: "text/vcard;charset=utf-8;" });
-  return {
-    url: URL.createObjectURL(blob),
-    dateiname: `kontakte-${turnier.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.vcf`,
-  };
+  return { blob, dateiname, url: URL.createObjectURL(blob), anzahl: karten.length };
 }
 
 // Kontaktdaten des Veranstalters – hier zentral eintragen, wird u. a. im Datenschutztext verwendet.
@@ -3093,9 +3089,20 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                 </button>
                 <button
                   className="kc-btn kc-btn--sekundaer"
-                  onClick={() => {
+                  onClick={async () => {
                     const ergebnis = kontakteVcfVorbereiten(t, bestaetigteRegs);
                     if (!ergebnis) { alert("Keine Telefonnummern zum Exportieren vorhanden."); return; }
+                    const datei = new File([ergebnis.blob], ergebnis.dateiname, { type: "text/vcard" });
+                    // Bevorzugt: natives Teilen-Menü (Mail/AirDrop/Nachrichten) - dort funktioniert
+                    // der Mehrfach-Kontakt-Import zuverlässig, anders als bei direktem Antippen in Safari.
+                    if (navigator.canShare && navigator.canShare({ files: [datei] })) {
+                      try {
+                        await navigator.share({ files: [datei], title: ergebnis.dateiname });
+                        return;
+                      } catch {
+                        // Abgebrochen oder nicht unterstützt - fällt durch zum Link als Rückfalllösung
+                      }
+                    }
                     setVcfExport({ turnierId: t.id, ...ergebnis });
                   }}
                   disabled={bestaetigteRegs.length === 0}
@@ -3109,10 +3116,9 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
               {vcfExport && vcfExport.turnierId === t.id && (
                 <div className="kc-vcf-hinweis">
                   <p>
-                    <strong>Wichtig auf dem iPhone:</strong> Den Link unten <strong>lange gedrückt halten</strong>
-                    (nicht normal antippen!) und „Datei herunterladen" wählen. Danach in der Dateien-App öffnen –
-                    erst dort erscheinen alle {bestaetigteRegs.length} Kontakte mit „Alle hinzufügen".
-                    Normales Antippen zeigt auf dem iPhone nur einen einzelnen Kontakt.
+                    <strong>Am zuverlässigsten:</strong> Datei unten per Mail an dich selbst schicken (Anhang) und
+                    aus der Mail-App heraus öffnen – dort erscheinen alle {vcfExport.anzahl} Kontakte zuverlässig
+                    mit „Alle hinzufügen". Direktes Antippen in Safari zeigt auf dem iPhone oft nur einen einzelnen Kontakt.
                   </p>
                   <a href={vcfExport.url} download={vcfExport.dateiname} className="kc-btn kc-btn--primary kc-btn--block">
                     📇 {vcfExport.dateiname}
