@@ -146,6 +146,52 @@ function csvHerunterladen(dateiname, inhalt) {
   URL.revokeObjectURL(url);
 }
 
+// Telefonnummer im internationalen Format (+49...) für die vCard - Handys erkennen das zuverlässiger
+// als lokale Schreibweisen mit führender 0.
+function telefonInternational(telefon) {
+  let n = (telefon || "").replace(/[^\d+]/g, "");
+  if (n.startsWith("+")) return n;
+  if (n.startsWith("0")) return "+49" + n.slice(1);
+  return n ? "+" + n : "";
+}
+
+// Erstellt eine vCard-Datei (.vcf) mit allen Kontakten einer Anmeldungsliste. Tippt man die
+// heruntergeladene Datei auf dem Handy an, öffnet sich automatisch die Kontakte-App mit einer
+// Vorschau aller Einträge - "Alle hinzufügen" reicht dann, um sie ins Adressbuch zu übernehmen.
+function kontakteAlsVcfHerunterladen(turnier, liste) {
+  const karten = liste
+    .filter((a) => a.telefon)
+    .map((a) => {
+      const name = `${a.verein} (${a.trainer})`.replace(/[\r\n]/g, " ");
+      const zeilen = [
+        "BEGIN:VCARD",
+        "VERSION:3.0",
+        `FN:${name}`,
+        `ORG:${a.verein}`,
+        `TEL;TYPE=CELL:${telefonInternational(a.telefon)}`,
+        a.email ? `EMAIL:${a.email}` : null,
+        `NOTE:KIDZCUP – ${turnier.name}`,
+        "END:VCARD",
+      ];
+      return zeilen.filter(Boolean).join("\r\n");
+    });
+
+  if (karten.length === 0) {
+    alert("Keine Telefonnummern zum Exportieren vorhanden.");
+    return;
+  }
+
+  const blob = new Blob([karten.join("\r\n")], { type: "text/vcard;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `kontakte-${turnier.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.vcf`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 // Kontaktdaten des Veranstalters – hier zentral eintragen, wird u. a. im Datenschutztext verwendet.
 const VERANSTALTER = {
   name: "KidzCup Dortmund",
@@ -3041,6 +3087,14 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                   disabled={regsFuerTurnier.length === 0}
                 >
                   📄 Teilnehmerliste als PDF
+                </button>
+                <button
+                  className="kc-btn kc-btn--sekundaer"
+                  onClick={() => kontakteAlsVcfHerunterladen(t, bestaetigteRegs)}
+                  disabled={bestaetigteRegs.length === 0}
+                  title="Legt alle bestätigten Vereine als Kontakte an - zum Import ins Adressbuch antippen"
+                >
+                  📇 Kontakte exportieren (bestätigt)
                 </button>
                 <button className="kc-btn kc-btn--gefahr" onClick={() => turnierLoeschen(t.id)}>Löschen</button>
               </div>
