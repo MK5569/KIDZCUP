@@ -3066,6 +3066,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
           const bestaetigteRegs = aktiveRegs.filter((a) => effektiverStatus(a, jetzt) === "bestaetigt");
           const bearbeiteteRegs = aktiveRegs.filter((a) => !["eingegangen", "bestaetigt"].includes(effektiverStatus(a, jetzt)));
           const anzahlInBearbeitung = bearbeiteteRegs.filter((a) => ["ausstehend", "zahlung_gemeldet"].includes(effektiverStatus(a, jetzt))).length;
+          const anzahlAbgelaufen = bearbeiteteRegs.filter((a) => effektiverStatus(a, jetzt) === "abgelaufen").length;
           const belegt = belegtePlaetze(t.id);
           const frei = Math.max(0, t.maxPlaetze - belegt);
           const offen = offenesTurnier === t.id;
@@ -3083,6 +3084,9 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                   <span className="kc-status-chip kc-status-chip--blau">🆕 {neueRegs.length} neue Anmeldung{neueRegs.length !== 1 ? "en" : ""}</span>
                   <span className="kc-status-chip kc-status-chip--gelb">⏳ {anzahlInBearbeitung} in Bearbeitung</span>
                   <span className="kc-status-chip kc-status-chip--gruen">✅ {bestaetigteRegs.length} bestätigt</span>
+                  {anzahlAbgelaufen > 0 && (
+                    <span className="kc-status-chip kc-status-chip--rot">⏰ {anzahlAbgelaufen} Frist abgelaufen</span>
+                  )}
                 </div>
               )}
               <dl className="kc-details">
@@ -4147,6 +4151,7 @@ const CSS = `
 .kc-status-chip--gruen { background: #E4F3EA; color: #1E6E3C; }
 .kc-status-chip--gelb { background: #FCF3DC; color: #7A5A00; }
 .kc-status-chip--blau { background: #E4ECF6; color: #1B3E6B; }
+.kc-status-chip--rot { background: #FBE9E7; color: #A6362B; }
 .kc-bestaetigt-block { background: #F0F8F3; border: 1.5px solid var(--kc-green); border-radius: 10px; padding: 10px 12px 4px; margin-bottom: 4px; display: flex; flex-direction: column; gap: 12px; }
 .kc-vcf-hinweis { background: #FCF3DC; border: 1.5px solid #E0A100; border-radius: 10px; padding: 12px 14px; margin-top: 10px; }
 .kc-vcf-hinweis p { margin: 0 0 10px; font-size: 13px; color: #7A5A00; line-height: 1.5; }
