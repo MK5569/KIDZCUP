@@ -674,17 +674,20 @@ async function spielplanAlsPdfHerunterladen(plan, teams, turnier) {
   const logoBreite = 46;
   const logoHoehe = 9.5;
   doc.addImage(LOGO_SRC, "JPEG", 14, y, logoBreite, logoHoehe);
+  let kopfUntenY = y + logoHoehe;
 
   if (qrDataUrl) {
     const qrGroesse = 22;
-    doc.addImage(qrDataUrl, "PNG", seitenBreite - 14 - qrGroesse, y - 2, qrGroesse, qrGroesse);
+    const qrY = y - 2;
+    doc.addImage(qrDataUrl, "PNG", seitenBreite - 14 - qrGroesse, qrY, qrGroesse, qrGroesse);
     doc.setFontSize(7);
     doc.setTextColor(120, 120, 120);
-    doc.text("Live-Spielplan", seitenBreite - 14 - qrGroesse / 2, y - 2 + qrGroesse + 3.5, { align: "center" });
+    doc.text("Live-Spielplan", seitenBreite - 14 - qrGroesse / 2, qrY + qrGroesse + 3.5, { align: "center" });
     doc.setTextColor(0, 0, 0);
+    kopfUntenY = Math.max(kopfUntenY, qrY + qrGroesse + 3.5);
   }
 
-  y += logoHoehe + 8;
+  y = kopfUntenY + 8;
 
   const neueZeilePruefen = (hoehe = 7) => {
     if (y + hoehe > seitenHoehe - 15) {
