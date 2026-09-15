@@ -732,7 +732,9 @@ async function spielplanAlsPdfHerunterladen(plan, teams, turnier) {
       });
       y += 5;
 
-      const spieleDerGruppe = plan.spiele.filter((s) => s.gruppeId === g.id);
+      const spieleDerGruppe = plan.spiele
+        .filter((s) => s.gruppeId === g.id)
+        .sort((a, b) => (a.uhrzeit || "99:99").localeCompare(b.uhrzeit || "99:99") || (a.feld || 0) - (b.feld || 0));
       if (spieleDerGruppe.length > 0) {
         y = pdfTabellenzeile(doc, 14, y, spielSpalten, ["Zeit/Feld", "Heim", "Erg.", "Gast"], true);
         spieleDerGruppe.forEach((s) => {
@@ -2384,7 +2386,9 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
     <div className="kc-spielplan">
       {plan.gruppen.map((g) => {
         const tabelle = berechneTabelle(g, plan.spiele);
-        const spieleDerGruppe = plan.spiele.filter((s) => s.gruppeId === g.id);
+        const spieleDerGruppe = plan.spiele
+        .filter((s) => s.gruppeId === g.id)
+        .sort((a, b) => (a.uhrzeit || "99:99").localeCompare(b.uhrzeit || "99:99") || (a.feld || 0) - (b.feld || 0));
         return (
           <div className="kc-gruppe-block" key={g.id}>
             <h3 className="kc-h3">{g.name}</h3>
