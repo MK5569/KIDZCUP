@@ -613,17 +613,78 @@ function spielplanMitZeit(plan, spielId, uhrzeit, feld) {
 }
 
 // Erstellt clientseitig ein einfaches, druckbares PDF des aktuellen Spielplans (ohne Server).
-function spielplanAlsPdfHerunterladen(plan, teams, turnier) {
+// Zeichnet eine Tabellenzeile mit echten Zellrahmen (Raster-Optik). spaltenBreiten und werte müssen
+// gleich lang sein. Mit kopf=true wird die Zeile fett und farbig hinterlegt (für Kopfzeilen).
+function pdfTabellenzeile(doc, x, y, spaltenBreiten, werte, kopf) {
+  const hoehe = 6.5;
+  let cx = x;
+  if (kopf) {
+    doc.setFillColor(27, 42, 71); // dunkelblau, passend zum KIDZCUP-Design
+    doc.rect(x, y, spaltenBreiten.reduce((a, b) => a + b, 0), hoehe, "F");
+    doc.setTextColor(255, 255, 255);
+    doc.setFont(undefined, "bold");
+  } else {
+    doc.setTextColor(30, 30, 30);
+    doc.setFont(undefined, "normal");
+  }
+  doc.setDrawColor(205, 210, 205);
+  spaltenBreiten.forEach((breite, i) => {
+    doc.rect(cx, y, breite, hoehe);
+    if (werte[i] !== undefined && werte[i] !== null) {
+      doc.text(String(werte[i]), cx + 2, y + hoehe - 2.2, { maxWidth: breite - 3.5 });
+    }
+    cx += breite;
+  });
+  doc.setTextColor(0, 0, 0);
+  doc.setFont(undefined, "normal");
+  return y + hoehe;
+}
+
+async function spielplanAlsPdfHerunterladen(plan, teams, turnier) {
   const teamName = (id) => {
     if (!id) return "Freilos";
     if (plan.teamNamen && plan.teamNamen[id]) return plan.teamNamen[id];
     const t = teams.find((a) => a.id === id);
     return t ? t.verein : "–";
   };
+  const zeitFeldText = (s) => (s.uhrzeit ? `${s.uhrzeit}${s.feld ? ` · F${s.feld}` : ""}` : "");
+
+  // QR-Code zum Spielplan vorab laden (als Bild einbettbar) - schlägt das fehl (z. B. offline),
+  // wird das PDF trotzdem ganz normal ohne QR-Code erstellt.
+  const spielplanLink = `${window.location.origin}${window.location.pathname}?turnier=${encodeURIComponent(turnier.id)}&ansicht=spielplan`;
+  let qrDataUrl = null;
+  try {
+    const antwort = await fetch(`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(spielplanLink)}`);
+    const blob = await antwort.blob();
+    qrDataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  } catch {
+    qrDataUrl = null;
+  }
 
   const doc = new jsPDF();
   const seitenHoehe = doc.internal.pageSize.getHeight();
-  let y = 18;
+  const seitenBreite = doc.internal.pageSize.getWidth();
+  let y = 16;
+
+  const logoBreite = 46;
+  const logoHoehe = 9.5;
+  doc.addImage(LOGO_SRC, "JPEG", 14, y, logoBreite, logoHoehe);
+
+  if (qrDataUrl) {
+    const qrGroesse = 22;
+    doc.addImage(qrDataUrl, "PNG", seitenBreite - 14 - qrGroesse, y - 2, qrGroesse, qrGroesse);
+    doc.setFontSize(7);
+    doc.setTextColor(120, 120, 120);
+    doc.text("Live-Spielplan", seitenBreite - 14 - qrGroesse / 2, y - 2 + qrGroesse + 3.5, { align: "center" });
+    doc.setTextColor(0, 0, 0);
+  }
+
+  y += logoHoehe + 8;
 
   const neueZeilePruefen = (hoehe = 7) => {
     if (y + hoehe > seitenHoehe - 15) {
@@ -633,7 +694,9 @@ function spielplanAlsPdfHerunterladen(plan, teams, turnier) {
   };
 
   doc.setFontSize(16);
+  doc.setFont(undefined, "bold");
   doc.text(`Spielplan: ${turnier.name}`, 14, y);
+  doc.setFont(undefined, "normal");
   y += 7;
   doc.setFontSize(10);
   doc.setTextColor(90, 90, 90);
@@ -641,86 +704,87 @@ function spielplanAlsPdfHerunterladen(plan, teams, turnier) {
   doc.setTextColor(0, 0, 0);
   y += 10;
 
+  // Spaltenbreiten für die Gruppentabelle (Verein, Sp, S, U, N, Tore, Pkt.) - Summe 182mm
+  const tabSpalten = [66, 16, 16, 16, 16, 26, 26];
+  // Spaltenbreiten für die Spiel-Zeilen (Zeit/Feld, Heim, Ergebnis, Gast) - Summe 182mm
+  const spielSpalten = [24, 68, 22, 68];
+
   if (plan.gruppen) {
     plan.gruppen.forEach((g) => {
-      neueZeilePruefen(10);
+      neueZeilePruefen(12);
       doc.setFontSize(13);
+      doc.setFont(undefined, "bold");
       doc.text(g.name, 14, y);
-      y += 7;
+      doc.setFont(undefined, "normal");
+      y += 6;
 
       const tabelle = berechneTabelle(g, plan.spiele);
-      doc.setFontSize(9);
-      doc.text("Verein", 14, y);
-      doc.text("Sp", 90, y);
-      doc.text("S", 102, y);
-      doc.text("U", 112, y);
-      doc.text("N", 122, y);
-      doc.text("Tore", 132, y);
-      doc.text("Pkt", 155, y);
-      y += 5;
+      doc.setFontSize(8.5);
+      y = pdfTabellenzeile(doc, 14, y, tabSpalten, ["Verein", "Sp", "S", "U", "N", "Tore", "Pkt."], true);
       tabelle.forEach((r) => {
         neueZeilePruefen();
-        doc.text(String(teamName(r.teamId)).slice(0, 32), 14, y);
-        doc.text(String(r.spiele), 90, y);
-        doc.text(String(r.siege), 102, y);
-        doc.text(String(r.unentschieden), 112, y);
-        doc.text(String(r.niederlagen), 122, y);
-        doc.text(`${r.tore}:${r.gegentore}`, 132, y);
-        doc.text(String(r.punkte), 155, y);
-        y += 5.5;
+        y = pdfTabellenzeile(doc, 14, y, tabSpalten, [
+          String(teamName(r.teamId)).slice(0, 38), r.spiele, r.siege, r.unentschieden, r.niederlagen, `${r.tore}:${r.gegentore}`, r.punkte,
+        ]);
       });
-      y += 3;
+      y += 5;
 
       const spieleDerGruppe = plan.spiele.filter((s) => s.gruppeId === g.id);
-      spieleDerGruppe.forEach((s) => {
-        neueZeilePruefen();
-        const ergebnis = s.heimTore !== null && s.gastTore !== null ? `${s.heimTore} : ${s.gastTore}` : "– : –";
-        const zeitFeld = s.uhrzeit ? `${s.uhrzeit} Uhr${s.feld ? ` (Feld ${s.feld})` : ""}  ·  ` : "";
-        const rueck = s.rueckspiel ? "  (Rückspiel)" : "";
-        doc.text(`${zeitFeld}${teamName(s.heimId)}  ${ergebnis}  ${teamName(s.gastId)}${rueck}`, 14, y);
-        y += 5.5;
-      });
-      y += 6;
+      if (spieleDerGruppe.length > 0) {
+        y = pdfTabellenzeile(doc, 14, y, spielSpalten, ["Zeit/Feld", "Heim", "Erg.", "Gast"], true);
+        spieleDerGruppe.forEach((s) => {
+          neueZeilePruefen();
+          const ergebnis = s.heimTore !== null && s.gastTore !== null ? `${s.heimTore}:${s.gastTore}` : "– : –";
+          const rueck = s.rueckspiel ? " (R)" : "";
+          y = pdfTabellenzeile(doc, 14, y, spielSpalten, [zeitFeldText(s), teamName(s.heimId) + rueck, ergebnis, teamName(s.gastId)]);
+        });
+      }
+      y += 8;
     });
   }
   if (plan.runden) {
     if (plan.gruppen) {
       neueZeilePruefen(12);
       doc.setFontSize(15);
+      doc.setFont(undefined, "bold");
       doc.text("K.o.-Endrunde", 14, y);
+      doc.setFont(undefined, "normal");
       y += 9;
     }
     plan.runden.forEach((runde, i) => {
-      neueZeilePruefen(10);
+      neueZeilePruefen(12);
       const titel = i === plan.runden.length - 1 ? "Finale" : i === plan.runden.length - 2 ? "Halbfinale" : `Runde ${i + 1}`;
       doc.setFontSize(13);
+      doc.setFont(undefined, "bold");
       doc.text(titel, 14, y);
-      y += 7;
-      doc.setFontSize(9);
+      doc.setFont(undefined, "normal");
+      y += 6;
+      doc.setFontSize(8.5);
+      y = pdfTabellenzeile(doc, 14, y, spielSpalten, ["Zeit/Feld", "Heim", "Erg.", "Gast"], true);
       runde.forEach((s) => {
         neueZeilePruefen();
         if (s.freilos) {
-          doc.text(`${teamName(s.heimId)}  –  Freilos`, 14, y);
+          y = pdfTabellenzeile(doc, 14, y, spielSpalten, ["", teamName(s.heimId), "Freilos", ""]);
         } else {
-          const ergebnis = s.heimTore !== null && s.gastTore !== null ? `${s.heimTore} : ${s.gastTore}` : "– : –";
-          const zeitFeld = s.uhrzeit ? `${s.uhrzeit} Uhr${s.feld ? ` (Feld ${s.feld})` : ""}  ·  ` : "";
-          doc.text(`${zeitFeld}${teamName(s.heimId)}  ${ergebnis}  ${teamName(s.gastId)}`, 14, y);
+          const ergebnis = s.heimTore !== null && s.gastTore !== null ? `${s.heimTore}:${s.gastTore}` : "– : –";
+          y = pdfTabellenzeile(doc, 14, y, spielSpalten, [zeitFeldText(s), teamName(s.heimId), ergebnis, teamName(s.gastId)]);
         }
-        y += 5.5;
       });
-      y += 6;
+      y += 8;
     });
     if (plan.platz3Spiel) {
-      neueZeilePruefen(10);
+      neueZeilePruefen(12);
       doc.setFontSize(13);
+      doc.setFont(undefined, "bold");
       doc.text("Spiel um Platz 3", 14, y);
-      y += 7;
-      doc.setFontSize(9);
-      const s = plan.platz3Spiel;
-      const ergebnis = s.heimTore !== null && s.gastTore !== null ? `${s.heimTore} : ${s.gastTore}` : "– : –";
-      const zeitFeld = s.uhrzeit ? `${s.uhrzeit} Uhr${s.feld ? ` (Feld ${s.feld})` : ""}  ·  ` : "";
-      doc.text(`${zeitFeld}${teamName(s.heimId)}  ${ergebnis}  ${teamName(s.gastId)}`, 14, y);
+      doc.setFont(undefined, "normal");
       y += 6;
+      doc.setFontSize(8.5);
+      const s = plan.platz3Spiel;
+      y = pdfTabellenzeile(doc, 14, y, spielSpalten, ["Zeit/Feld", "Heim", "Erg.", "Gast"], true);
+      const ergebnis = s.heimTore !== null && s.gastTore !== null ? `${s.heimTore}:${s.gastTore}` : "– : –";
+      y = pdfTabellenzeile(doc, 14, y, spielSpalten, [zeitFeldText(s), teamName(s.heimId), ergebnis, teamName(s.gastId)]);
+      y += 8;
     }
   }
 
