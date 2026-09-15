@@ -3734,6 +3734,13 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                           <div>
                             <strong>{a.verein}</strong> – Jahrgang {a.jahrgang} ({a.jugend}) · Trainer: {a.trainer}
                             <div className="kc-notiz">{a.email} · {a.telefon}</div>
+                            {(a.spielstaerke || a.jahrgangTyp) && (
+                              <div className="kc-notiz">
+                                {a.jahrgangTyp && jahrgangTypLabel(a.jahrgangTyp)}
+                                {a.spielstaerke && a.jahrgangTyp && " · "}
+                                {a.spielstaerke && `Spielstärke: ${a.spielstaerke.charAt(0).toUpperCase()}${a.spielstaerke.slice(1)}`}
+                              </div>
+                            )}
                             {a.gebuehrenfrei && <div className="kc-notiz" style={{ color: "var(--kc-green)", fontWeight: 600 }}>🆓 Gebührenfrei</div>}
                           </div>
                           <span className="kc-status-badge kc-status-badge--klein" style={{ background: STATUS_FARBE.bestaetigt }}>
