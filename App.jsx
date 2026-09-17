@@ -2959,6 +2959,8 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
   const [zeigeEinnahmen, setZeigeEinnahmen] = useState(false);
   const [vcfExport, setVcfExport] = useState(null); // { turnierId, url, dateiname } - lang-drückbarer Kontakte-Export-Link
   const [offenerSpielplanTurnier, setOffenerSpielplanTurnier] = useState(null);
+  const [adminMonatFilter, setAdminMonatFilter] = useState("");
+  const [adminJugendFilter, setAdminJugendFilter] = useState("");
 
   const nachLoginProfilLaden = async (neueSession) => {
     setProfilLaedt(true);
@@ -3536,7 +3538,43 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
 
       <div className="kc-liste">
         {turniere.length === 0 && <div className="kc-empty">Noch keine Turniere angelegt.</div>}
-        {[...turniere].sort((a, b) => new Date(a.datum) - new Date(b.datum)).map((t) => {
+        {turniere.length > 0 && (() => {
+          const sortiert = [...turniere].sort((a, b) => new Date(a.datum) - new Date(b.datum));
+          const verfuegbareMonate = Array.from(new Set(sortiert.map((t) => new Date(t.datum).getMonth()))).sort((a, b) => a - b);
+          const gefiltert = sortiert.filter((t) => {
+            if (adminMonatFilter !== "" && new Date(t.datum).getMonth() !== Number(adminMonatFilter)) return false;
+            if (adminJugendFilter !== "" && t.zielgruppen && t.zielgruppen.length > 0 && !t.zielgruppen.includes(adminJugendFilter)) return false;
+            return true;
+          });
+          return (
+            <>
+              <div className="kc-filter-leiste">
+                <label className="kc-feld">
+                  <span>Monat</span>
+                  <select className="kc-input" value={adminMonatFilter} onChange={(e) => setAdminMonatFilter(e.target.value)}>
+                    <option value="">Alle Monate</option>
+                    {verfuegbareMonate.map((m) => (
+                      <option key={m} value={m}>{MONATSNAMEN[m]}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="kc-feld">
+                  <span>Jugend</span>
+                  <select className="kc-input" value={adminJugendFilter} onChange={(e) => setAdminJugendFilter(e.target.value)}>
+                    <option value="">Alle Jugenden</option>
+                    {JUGEND_GRUPPEN.map((g) => (
+                      <option key={g.wert} value={g.wert}>{g.label}</option>
+                    ))}
+                  </select>
+                </label>
+                {(adminMonatFilter !== "" || adminJugendFilter !== "") && (
+                  <button className="kc-btn kc-btn--sekundaer kc-btn--klein kc-filter-zuruecksetzen" onClick={() => { setAdminMonatFilter(""); setAdminJugendFilter(""); }}>
+                    Filter zurücksetzen
+                  </button>
+                )}
+              </div>
+              {gefiltert.length === 0 && <div className="kc-empty">Kein Turnier passt zu den gewählten Filtern.</div>}
+              {gefiltert.map((t) => {
           const regsFuerTurnier = anmeldungen.filter((a) => a.turnierId === t.id);
           const wartelisteRegs = regsFuerTurnier.filter((a) => effektiverStatus(a, jetzt) === "warteliste");
           const aktiveRegs = regsFuerTurnier.filter((a) => effektiverStatus(a, jetzt) !== "warteliste");
@@ -3865,7 +3903,10 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
               )}
             </div>
           );
-        })}
+              })}
+            </>
+          );
+        })()}
       </div>
     </div>
   );
