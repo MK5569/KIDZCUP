@@ -83,7 +83,7 @@ const STATUS_LABEL = {
   ausstehend: "Zahlung ausstehend",
   zahlung_gemeldet: "Zahlung gemeldet – wird geprüft",
   bestaetigt: "Teilnahme bestätigt",
-  abgelehnt: "Zahlung abgelehnt",
+  abgelehnt: "Abgelehnt",
   abgelaufen: "Frist abgelaufen – nicht bestätigt",
   warteliste: "Auf Warteliste",
 };
@@ -304,11 +304,11 @@ function mailVorlage(typ, anmeldung, turnier) {
   }
   if (typ === "ablehnung") {
     return {
-      betreff: `Zahlung nicht bestätigt – ${turnier?.name || "KIDZCUP"}`,
+      betreff: `Anmeldung nicht bestätigt – ${turnier?.name || "KIDZCUP"}`,
       text:
         `Hallo ${anmeldung.trainer || ""},\n\n` +
-        `leider konnten wir die gemeldete Zahlung für "${turnier?.name}" (${anmeldung.verein}) nicht zuordnen bzw. bestätigen.\n\n` +
-        `Bitte meldet euch kurz bei uns, damit wir das gemeinsam klären können.\n\n${gruss}`,
+        `leider können wir die Anmeldung von ${anmeldung.verein} für "${turnier?.name}" (${termin}) nicht bestätigen.\n\n` +
+        `Bitte meldet euch kurz bei uns, falls ihr dazu Rückfragen habt.\n\n${gruss}`,
     };
   }
   if (typ === "warteliste_aufnahme") {
@@ -866,14 +866,30 @@ function zahlungsBelegHerunterladen(anmeldung, turnier) {
   doc.save(`zahlungsbeleg-${anmeldung.verein.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.pdf`);
 }
 
+// Reihenfolge der Status-Gruppen in der Teilnehmerliste: erst die, die noch Handlungsbedarf haben
+// bzw. für die Planung wichtig sind, Abgelehnte ganz am Ende.
+const TEILNEHMERLISTE_STATUS_REIHENFOLGE = [
+  "ausstehend", "zahlung_gemeldet", "eingegangen", "abgelaufen", "bestaetigt", "warteliste", "abgelehnt",
+];
+
 // Erstellt clientseitig eine PDF-Teilnehmerliste für die eigenen Unterlagen des Veranstalters
 // (z. B. nach dem Turnier lokal zu archivieren). Enthält bewusst mehr Details als die öffentliche
 // Mannschaftsliste, da dies eine reine Admin-Funktion ist (Kontaktdaten inklusive).
+// Gruppiert nach Status (Zahlung ausstehend, Bestätigt, Warteliste, Abgelehnt, ...), damit man beim
+// Durchblättern sofort sieht, wer wozu gehört, statt alles nur alphabetisch gemischt zu haben.
 function teilnehmerlisteAlsPdfHerunterladen(turnier, anmeldungen, jetzt) {
-  const liste = [...anmeldungen].sort((a, b) => {
-    if (a.jugend !== b.jugend) return (a.jugend || "").localeCompare(b.jugend || "");
-    return (a.verein || "").localeCompare(b.verein || "");
-  });
+  const nachStatusSortiert = (liste) =>
+    [...liste].sort((a, b) => {
+      if (a.jugend !== b.jugend) return (a.jugend || "").localeCompare(b.jugend || "");
+      return (a.verein || "").localeCompare(b.verein || "");
+    });
+
+  const gruppen = TEILNEHMERLISTE_STATUS_REIHENFOLGE
+    .map((status) => ({
+      status,
+      eintraege: nachStatusSortiert(anmeldungen.filter((a) => effektiverStatus(a, jetzt) === status)),
+    }))
+    .filter((g) => g.eintraege.length > 0);
 
   const doc = new jsPDF();
   const seitenHoehe = doc.internal.pageSize.getHeight();
@@ -896,44 +912,59 @@ function teilnehmerlisteAlsPdfHerunterladen(turnier, anmeldungen, jetzt) {
   y += 6;
   doc.setFontSize(8.5);
   doc.setTextColor(120, 120, 120);
-  doc.text(`Erstellt am ${formatDatumZeit(Date.now())} · ${liste.length} Anmeldung(en)`, 14, y);
+  doc.text(`Erstellt am ${formatDatumZeit(Date.now())} · ${anmeldungen.length} Anmeldung(en)`, 14, y);
   doc.setTextColor(0, 0, 0);
   y += 10;
 
-  liste.forEach((a, i) => {
-    neueZeilePruefen(30);
-    const st = effektiverStatus(a, jetzt);
-
-    doc.setFontSize(11);
+  let laufendeNummer = 0;
+  gruppen.forEach(({ status, eintraege }) => {
+    neueZeilePruefen(14);
+    doc.setFontSize(12.5);
     doc.setFont(undefined, "bold");
-    doc.text(`${i + 1}. ${a.verein}`, 14, y);
+    doc.setTextColor(40, 40, 40);
+    doc.text(`${STATUS_LABEL[status] || status} (${eintraege.length})`, 14, y);
+    doc.setTextColor(0, 0, 0);
     doc.setFont(undefined, "normal");
-    doc.setFontSize(9);
-    doc.text(STATUS_LABEL[st] || st, 160, y);
-    y += 5.5;
+    y += 3;
+    doc.setDrawColor(160, 160, 160);
+    doc.line(14, y, 196, y);
+    y += 7;
 
-    doc.setFontSize(9);
-    doc.text(`Jahrgang/Jugend: ${a.jahrgang} / ${a.jugend}${a.jahrgangTyp ? " (" + jahrgangTypLabel(a.jahrgangTyp) + ")" : ""}`, 14, y);
-    y += 5;
-    if (a.spielstaerke) {
-      doc.text(`Spielstärke: ${a.spielstaerke.charAt(0).toUpperCase()}${a.spielstaerke.slice(1)}`, 14, y);
+    eintraege.forEach((a) => {
+      laufendeNummer += 1;
+      neueZeilePruefen(30);
+
+      doc.setFontSize(11);
+      doc.setFont(undefined, "bold");
+      doc.text(`${laufendeNummer}. ${a.verein}`, 14, y);
+      doc.setFont(undefined, "normal");
+      y += 5.5;
+
+      doc.setFontSize(9);
+      doc.text(`Jahrgang/Jugend: ${a.jahrgang} / ${a.jugend}${a.jahrgangTyp ? " (" + jahrgangTypLabel(a.jahrgangTyp) + ")" : ""}`, 14, y);
       y += 5;
-    }
-    doc.text(`Trainer: ${a.trainer}`, 14, y);
-    y += 5;
-    doc.text(`Kontakt: ${a.email} · ${a.telefon}`, 14, y);
-    y += 5;
-    if (a.notfallkontakt) {
-      doc.text(`Notfallkontakt: ${a.notfallkontakt}`, 14, y);
+      if (a.spielstaerke) {
+        doc.text(`Spielstärke: ${a.spielstaerke.charAt(0).toUpperCase()}${a.spielstaerke.slice(1)}`, 14, y);
+        y += 5;
+      }
+      doc.text(`Trainer: ${a.trainer}`, 14, y);
       y += 5;
-    }
-    if (a.gebuehrenfrei) {
-      doc.text("Gebührenfrei", 14, y);
+      doc.text(`Kontakt: ${a.email} · ${a.telefon}`, 14, y);
       y += 5;
-    }
+      if (a.notfallkontakt) {
+        doc.text(`Notfallkontakt: ${a.notfallkontakt}`, 14, y);
+        y += 5;
+      }
+      if (a.gebuehrenfrei) {
+        doc.text("Gebührenfrei", 14, y);
+        y += 5;
+      }
+      y += 4;
+      doc.setDrawColor(220, 220, 220);
+      doc.line(14, y - 2, 196, y - 2);
+    });
+
     y += 4;
-    doc.setDrawColor(220, 220, 220);
-    doc.line(14, y - 2, 196, y - 2);
   });
 
   doc.save(`teilnehmerliste-${turnier.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.pdf`);
@@ -2945,6 +2976,10 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
   const [profilLaedt, setProfilLaedt] = useState(false);
   const [anmeldungen, setAnmeldungen] = useState([]); // volle Anmeldedaten - nur nach Admin-Login geladen
   const [anmeldungenLaedt, setAnmeldungenLaedt] = useState(true);
+  // Protokoll manueller Löschungen (Art. 17 DSGVO) - bewusst OHNE Kontaktdaten (kein Name/E-Mail/Telefon),
+  // damit man später noch nachvollziehen kann, wann/für welches Turnier gelöscht wurde, ohne den Zweck
+  // der Löschung (Entfernung personenbezogener Daten) zu unterlaufen.
+  const [loeschprotokoll, setLoeschprotokoll] = useState([]);
 
   const [zeigeFormular, setZeigeFormular] = useState(false);
   const [bearbeitetesTurnier, setBearbeitetesTurnier] = useState(null);
@@ -3015,6 +3050,12 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
         console.warn("Anmeldungen konnten nicht geladen werden:", e.message);
       } finally {
         setAnmeldungenLaedt(false);
+      }
+      try {
+        const protokollZeilen = await supabaseSelect("loeschprotokoll", "?select=*&order=geloescht_am.desc", session.access_token);
+        setLoeschprotokoll(protokollZeilen);
+      } catch (e) {
+        console.warn("Löschprotokoll konnte nicht geladen werden:", e.message);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3246,6 +3287,25 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
   // Art. 17 DSGVO: manuelles Löschen einer einzelnen Anmeldung, z. B. auf Anfrage per E-Mail/Telefon.
   const anmeldungManuellLoeschen = async (anmeldung) => {
     if (!confirm(`Anmeldung von "${anmeldung.verein}" (${anmeldung.jugend}) wirklich endgültig löschen?`)) return;
+    const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
+    // Bewusst nur nicht-personenbezogene Eckdaten protokollieren (kein Trainername/E-Mail/Telefon) -
+    // sonst würde der Zweck der Löschung (Entfernen personenbezogener Daten) unterlaufen.
+    try {
+      const protokollZeile = await supabaseInsert(
+        "loeschprotokoll",
+        {
+          verein: anmeldung.verein,
+          jugend: anmeldung.jugend,
+          turnier_name: turnier ? turnier.name : "",
+          status_vor_loeschung: anmeldung.status,
+          geloescht_von: adminProfil.name || "",
+        },
+        session.access_token
+      );
+      setLoeschprotokoll((prev) => [protokollZeile[0], ...prev]);
+    } catch (e) {
+      console.warn("Löschprotokoll konnte nicht gespeichert werden:", e.message);
+    }
     await supabaseDelete("anmeldungen", anmeldung.id, session.access_token);
     setAnmeldungen((prev) => prev.filter((a) => a.id !== anmeldung.id));
     belegungNeuLaden();
@@ -3495,6 +3555,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
         <DatenschutzLoeschTools
           turniere={turniere}
           anmeldungen={anmeldungen}
+          loeschprotokoll={loeschprotokoll}
           onAltdatenLoeschen={altdatenLoeschen}
           onSchliessen={() => setZeigeDatenschutzTools(false)}
         />
@@ -3581,7 +3642,8 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
           // Neu eingegangene, noch unbearbeitete Anmeldungen zuerst - die brauchen deine Aufmerksamkeit am dringendsten.
           const neueRegs = aktiveRegs.filter((a) => effektiverStatus(a, jetzt) === "eingegangen");
           const bestaetigteRegs = aktiveRegs.filter((a) => effektiverStatus(a, jetzt) === "bestaetigt");
-          const bearbeiteteRegs = aktiveRegs.filter((a) => !["eingegangen", "bestaetigt"].includes(effektiverStatus(a, jetzt)));
+          const abgelehnteRegs = aktiveRegs.filter((a) => effektiverStatus(a, jetzt) === "abgelehnt");
+          const bearbeiteteRegs = aktiveRegs.filter((a) => !["eingegangen", "bestaetigt", "abgelehnt"].includes(effektiverStatus(a, jetzt)));
           const anzahlInBearbeitung = bearbeiteteRegs.filter((a) => ["ausstehend", "zahlung_gemeldet"].includes(effektiverStatus(a, jetzt))).length;
           const anzahlAbgelaufen = bearbeiteteRegs.filter((a) => effektiverStatus(a, jetzt) === "abgelaufen").length;
           const belegt = belegtePlaetze(t.id);
@@ -3603,6 +3665,9 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                   <span className="kc-status-chip kc-status-chip--gruen">✅ {bestaetigteRegs.length} bestätigt</span>
                   {anzahlAbgelaufen > 0 && (
                     <span className="kc-status-chip kc-status-chip--rot">⏰ {anzahlAbgelaufen} Frist abgelaufen</span>
+                  )}
+                  {abgelehnteRegs.length > 0 && (
+                    <span className="kc-status-chip kc-status-chip--rot">❌ {abgelehnteRegs.length} abgelehnt</span>
                   )}
                 </div>
               )}
@@ -3733,6 +3798,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                             <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => erinnerungSenden(a)}>
                               ✉️ Erinnerung senden
                             </button>
+                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "abgelehnt")}>Ablehnen</button>
                           </div>
                         )}
                         {st === "abgelaufen" && (
@@ -3743,6 +3809,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                             <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "bestaetigt")}>
                               ✅ Direkt bestätigen (bereits bezahlt)
                             </button>
+                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "abgelehnt")}>Ablehnen</button>
                           </div>
                         )}
                         <div className="kc-admin-aktionen kc-admin-aktionen--klein">
@@ -3842,6 +3909,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                             <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => erinnerungSenden(a)}>
                               ✉️ Erinnerung senden
                             </button>
+                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "abgelehnt")}>Ablehnen</button>
                           </div>
                         )}
                         {st === "abgelaufen" && (
@@ -3852,6 +3920,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                             <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "bestaetigt")}>
                               ✅ Direkt bestätigen (bereits bezahlt)
                             </button>
+                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "abgelehnt")}>Ablehnen</button>
                           </div>
                         )}
                         <div className="kc-admin-aktionen kc-admin-aktionen--klein">
@@ -3893,6 +3962,31 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                               onClick={() => ausWartelisteAufnehmen(a.id)}
                             >
                               {frei === 0 ? "Kein Platz frei" : "In Turnier aufnehmen"}
+                            </button>
+                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "abgelehnt")}>Ablehnen</button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {abgelehnteRegs.length > 0 && (
+                    <div className="kc-abgelehnt-block">
+                      <h3 className="kc-h3">❌ Abgelehnte ({abgelehnteRegs.length})</h3>
+                      {abgelehnteRegs.map((a) => (
+                        <div className="kc-anmeldungs-zeile" key={a.id}>
+                          <div>
+                            <strong>{a.verein}</strong> – Jahrgang {a.jahrgang} ({a.jugend}) · Trainer: {a.trainer}
+                            <div className="kc-notiz">{a.email} · {a.telefon}</div>
+                            <div className="kc-notiz">Angemeldet: {formatDatumZeit(a.angemeldetAm)}</div>
+                            {a.bearbeitetVon && <div className="kc-notiz">Abgelehnt von: {a.bearbeitetVon}</div>}
+                          </div>
+                          <span className="kc-status-badge kc-status-badge--klein" style={{ background: STATUS_FARBE.abgelehnt }}>
+                            {STATUS_LABEL.abgelehnt}
+                          </span>
+                          <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungManuellLoeschen(a)} title="Löschung auf Anfrage, z. B. bei Auskunftsersuchen">
+                              🗑 Daten löschen
                             </button>
                           </div>
                         </div>
@@ -4114,7 +4208,7 @@ function AdminsVerwalten({ admins, eigeneId, onEntfernen, onSchliessen }) {
   );
 }
 
-function DatenschutzLoeschTools({ turniere, anmeldungen, onAltdatenLoeschen, onSchliessen }) {
+function DatenschutzLoeschTools({ turniere, anmeldungen, loeschprotokoll, onAltdatenLoeschen, onSchliessen }) {
   const alteTurniere = turniere
     .filter((t) => monateSeitDatum(t.datum) >= AUFBEWAHRUNG_MONATE)
     .filter((t) => anmeldungen.some((a) => a.turnierId === t.id))
@@ -4148,6 +4242,30 @@ function DatenschutzLoeschTools({ turniere, anmeldungen, onAltdatenLoeschen, onS
               </div>
             );
           })}
+        </div>
+      )}
+
+      <h2 className="kc-h2" style={{ marginTop: "22px" }}>Löschprotokoll</h2>
+      <p className="kc-sub">
+        Wer wann über „🗑 Daten löschen" entfernt wurde - bewusst ohne Trainername, E-Mail oder Telefon,
+        damit der Zweck der Löschung erhalten bleibt.
+      </p>
+      {loeschprotokoll.length === 0 ? (
+        <p className="kc-notiz">Bisher wurde noch keine Anmeldung manuell gelöscht.</p>
+      ) : (
+        <div className="kc-anmeldungs-tabelle">
+          {loeschprotokoll.map((e) => (
+            <div className="kc-anmeldungs-zeile" key={e.id}>
+              <div>
+                <strong>{e.verein}</strong> ({e.jugend}) · {e.turnier_name}
+                <div className="kc-notiz">
+                  Gelöscht am {formatDatumZeit(e.geloescht_am)}
+                  {e.geloescht_von ? ` von ${e.geloescht_von}` : ""}
+                  {e.status_vor_loeschung ? ` · Status vor Löschung: ${STATUS_LABEL[e.status_vor_loeschung] || e.status_vor_loeschung}` : ""}
+                </div>
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
@@ -4670,6 +4788,7 @@ const CSS = `
 .kc-ds-hinweis-box { background: #FCF3DC; color: #7A5A00; padding: 8px 10px; border-radius: 6px; margin: 0 0 4px !important; }
 
 .kc-warteliste-block { margin-top: 6px; padding-top: 10px; border-top: 1px dashed #D7DED6; }
+.kc-abgelehnt-block { margin-top: 6px; padding-top: 10px; border-top: 1px dashed #D7DED6; }
 .kc-neu-block { background: #EEF4FB; border: 1.5px solid var(--kc-blue); border-radius: 10px; padding: 10px 12px 4px; margin-bottom: 4px; display: flex; flex-direction: column; gap: 12px; }
 .kc-h3--neu { color: var(--kc-blue); margin-top: 0; }
 .kc-bereits-bearbeitet-block { margin-top: 10px; padding-top: 10px; border-top: 1px dashed #D7DED6; display: flex; flex-direction: column; gap: 12px; opacity: 0.85; }
