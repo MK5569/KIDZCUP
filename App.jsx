@@ -30,6 +30,15 @@ function normalisiereLink(url) {
   return "https://" + bereinigt;
 }
 
+// Baut aus einer Adresse einen Google-Maps-Link. Diese URL-Form funktioniert überall zuverlässig:
+// auf dem Handy öffnet sie automatisch die installierte Maps-/Google-Maps-App (falls vorhanden),
+// im Browser landet man auf der Google-Maps-Website - ganz ohne dass wir die Adresse vorher
+// geocodieren oder Koordinaten einzeln erfassen müssten.
+function mapsLink(ort) {
+  if (!ort) return null;
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(ort)}`;
+}
+
 function formatDatum(iso) {
   if (!iso) return "–";
   try {
@@ -1867,10 +1876,7 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
               </div>
               <dl className="kc-details">
                 <div><dt>Termin</dt><dd>{formatTermin(t)}</dd></div>
-                <div><dt>Ort</dt><dd>{t.ort}</dd></div>
-                <div><dt>Gebühr</dt><dd>{t.preis} €</dd></div>
-              </dl>
-              {t.beschreibung && <p className="kc-turnier-beschreibung">{t.beschreibung}</p>}
+                <div><dt>Ort</dt><dd><a className="kc-ort-link" href={mapsLink(t.ort)} target="_blank" rel="noopener">📍 {t.ort}</a></dd></div>
               <button className="kc-btn kc-btn--primary" onClick={() => setAusgewaehlt(t)}>
                 {frei === 0 ? "Auf Warteliste anmelden" : "Jetzt anmelden"}
               </button>
@@ -2120,7 +2126,7 @@ function AnmeldeFormular({ turnier, belegtePlaetze, pruefeDuplikat, jetzt, onAbb
       )}
       <h1 className="kc-h1">Anmeldung: {turnier.name}</h1>
       <p className="kc-sub">
-        {formatTermin(turnier)} · {turnier.ort} · {turnier.preis} € Startgebühr pro Mannschaft · noch {frei} Plätze frei
+        {formatTermin(turnier)} · <a className="kc-ort-link" href={mapsLink(turnier.ort)} target="_blank" rel="noopener">📍 {turnier.ort}</a> · {turnier.preis} € Startgebühr pro Mannschaft · noch {frei} Plätze frei
       </p>
       {turnier.beschreibung && <p className="kc-turnier-beschreibung">{turnier.beschreibung}</p>}
 
@@ -2268,7 +2274,11 @@ function AnmeldeStatusKarte({ anmeldung, turnier, jetzt, alsBezahltMelden, fotoE
       <div className="kc-status-karte">
         <span className="kc-status-badge" style={{ background: STATUS_FARBE[status] }}>{STATUS_LABEL[status]}</span>
         <h1 className="kc-h1">{turnier ? turnier.name : "Turnier"}</h1>
-        <p className="kc-sub">{turnier ? `${formatTermin(turnier)} · ${turnier.ort}` : ""}</p>
+        <p className="kc-sub">
+          {turnier ? (
+            <>{formatTermin(turnier)} · <a className="kc-ort-link" href={mapsLink(turnier.ort)} target="_blank" rel="noopener">📍 {turnier.ort}</a></>
+          ) : ""}
+        </p>
 
         <dl className="kc-details">
           <div><dt>Verein</dt><dd>{anmeldung.verein}</dd></div>
@@ -3673,9 +3683,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
               )}
               <dl className="kc-details">
                 <div><dt>Termin</dt><dd>{formatDatum(t.datum)}</dd></div>
-                <div><dt>Ort</dt><dd>{t.ort}</dd></div>
-                <div><dt>Gebühr</dt><dd>{t.preis} €</dd></div>
-                <div><dt>Zahlungslink</dt><dd className="kc-link-truncate">{t.zahlLink || "– nicht hinterlegt –"}</dd></div>
+                <div><dt>Ort</dt><dd><a className="kc-ort-link" href={mapsLink(t.ort)} target="_blank" rel="noopener">📍 {t.ort}</a></dd></div>
               </dl>
               <div className="kc-admin-aktionen">
                 <button className="kc-btn kc-btn--sekundaer" onClick={() => setOffenesTurnier(offen ? null : t.id)}>
@@ -4788,6 +4796,8 @@ const CSS = `
 .kc-ds-hinweis-box { background: #FCF3DC; color: #7A5A00; padding: 8px 10px; border-radius: 6px; margin: 0 0 4px !important; }
 
 .kc-warteliste-block { margin-top: 6px; padding-top: 10px; border-top: 1px dashed #D7DED6; }
+.kc-ort-link { color: inherit; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px; }
+.kc-ort-link:hover { text-decoration-style: solid; }
 .kc-abgelehnt-block { margin-top: 6px; padding-top: 10px; border-top: 1px dashed #D7DED6; }
 .kc-neu-block { background: #EEF4FB; border: 1.5px solid var(--kc-blue); border-radius: 10px; padding: 10px 12px 4px; margin-bottom: 4px; display: flex; flex-direction: column; gap: 12px; }
 .kc-h3--neu { color: var(--kc-blue); margin-top: 0; }
