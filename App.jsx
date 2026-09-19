@@ -1877,6 +1877,9 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
               <dl className="kc-details">
                 <div><dt>Termin</dt><dd>{formatTermin(t)}</dd></div>
                 <div><dt>Ort</dt><dd><a className="kc-ort-link" href={mapsLink(t.ort)} target="_blank" rel="noopener">📍 {t.ort}</a></dd></div>
+                <div><dt>Gebühr</dt><dd>{t.preis} €</dd></div>
+              </dl>
+              {t.beschreibung && <p className="kc-turnier-beschreibung">{t.beschreibung}</p>}
               <button className="kc-btn kc-btn--primary" onClick={() => setAusgewaehlt(t)}>
                 {frei === 0 ? "Auf Warteliste anmelden" : "Jetzt anmelden"}
               </button>
@@ -3684,6 +3687,8 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
               <dl className="kc-details">
                 <div><dt>Termin</dt><dd>{formatDatum(t.datum)}</dd></div>
                 <div><dt>Ort</dt><dd><a className="kc-ort-link" href={mapsLink(t.ort)} target="_blank" rel="noopener">📍 {t.ort}</a></dd></div>
+                <div><dt>Gebühr</dt><dd>{t.preis} €</dd></div>
+                <div><dt>Zahlungslink</dt><dd className="kc-link-truncate">{t.zahlLink || "– nicht hinterlegt –"}</dd></div>
               </dl>
               <div className="kc-admin-aktionen">
                 <button className="kc-btn kc-btn--sekundaer" onClick={() => setOffenesTurnier(offen ? null : t.id)}>
