@@ -388,9 +388,81 @@ function neuesSpiel(heimId, gastId, extra) {
   return { id: neueId("spiel"), heimId: heimId ?? null, gastId: gastId ?? null, heimTore: null, gastTore: null, ...extra };
 }
 
-// Gruppenphase: teilt Teams gleichmäßig in N Gruppen und erzeugt Jeder-gegen-Jeden-Spiele je Gruppe.
+// Fallback für erstelleZufallsTeilplan: paart wiederholt die beiden Mannschaften mit den
+// wenigsten bisherigen Spielen, die noch nicht gegeneinander gespielt haben. Wird nur genutzt,
+// falls das Konfigurationsmodell nach vielen Versuchen keine gültige Lösung fand (kommt bei
+// typischen Turniergrößen praktisch nicht vor, aber sicherheitshalber vorhanden).
+function erstelleZufallsTeilplanGreedy(teamIds, ziel) {
+  const n = teamIds.length;
+  const grad = new Array(n).fill(0);
+  const gespielt = Array.from({ length: n }, () => new Set());
+  const paare = [];
+
+  let weiter = true;
+  while (weiter) {
+    weiter = false;
+    const reihenfolge = mischen(teamIds.map((_, i) => i)).sort((a, b) => grad[a] - grad[b]);
+    for (let x = 0; x < reihenfolge.length; x++) {
+      const i = reihenfolge[x];
+      if (grad[i] >= ziel[i]) continue;
+      for (let y = x + 1; y < reihenfolge.length; y++) {
+        const j = reihenfolge[y];
+        if (grad[j] >= ziel[j]) continue;
+        if (gespielt[i].has(j)) continue;
+        paare.push([teamIds[i], teamIds[j]]);
+        grad[i]++; grad[j]++;
+        gespielt[i].add(j); gespielt[j].add(i);
+        weiter = true;
+        break;
+      }
+    }
+  }
+  return paare;
+}
+
+// Erstellt einen zufälligen Teil-Spielplan: jede Mannschaft spielt nur gegen eine zufällige Auswahl
+// von "spieleProMannschaft" anderen Mannschaften statt gegen alle (kein Jeder-gegen-Jeden).
+// Technik: Konfigurationsmodell (Stub-Pairing) - jede Mannschaft bekommt so viele "Stubs" wie sie
+// Spiele haben soll, die Stubs werden gemischt und paarweise verbunden. Ergibt ein Duplikat oder ein
+// Spiel einer Mannschaft gegen sich selbst, wird neu gemischt (bis zu 500 Versuche), da das beim
+// zufälligen Mischen gelegentlich vorkommt. Geht "Spiele pro Mannschaft × Anzahl Mannschaften" nicht
+// glatt auf (ungerade Summe), bekommt eine zufällig gewählte Mannschaft ein Spiel mehr.
+function erstelleZufallsTeilplan(teamIds, spieleProMannschaft) {
+  const n = teamIds.length;
+  const ziel = teamIds.map(() => spieleProMannschaft);
+  if (ziel.reduce((a, b) => a + b, 0) % 2 !== 0) {
+    ziel[Math.floor(Math.random() * n)] += 1;
+  }
+
+  for (let versuch = 0; versuch < 500; versuch++) {
+    const stubs = [];
+    teamIds.forEach((_, i) => {
+      for (let k = 0; k < ziel[i]; k++) stubs.push(i);
+    });
+    const gemischt = mischen(stubs);
+
+    const kanten = new Set();
+    const paare = [];
+    let gueltig = true;
+    for (let i = 0; i < gemischt.length; i += 2) {
+      const a = gemischt[i];
+      const b = gemischt[i + 1];
+      if (a === undefined || b === undefined || a === b) { gueltig = false; break; }
+      const key = a < b ? `${a}-${b}` : `${b}-${a}`;
+      if (kanten.has(key)) { gueltig = false; break; }
+      kanten.add(key);
+      paare.push([teamIds[a], teamIds[b]]);
+    }
+    if (gueltig) return paare;
+  }
+  return erstelleZufallsTeilplanGreedy(teamIds, ziel);
+}
+
+// Gruppenphase: teilt Teams gleichmäßig in N Gruppen und erzeugt Jeder-gegen-Jeden-Spiele je Gruppe -
+// oder, falls spieleProMannschaft gesetzt ist und kleiner als "Jeder gegen Jeden" wäre, einen
+// zufälligen Teil-Spielplan (siehe erstelleZufallsTeilplan).
 // Mit mitRueckrunde=true wird jede Paarung zusätzlich mit vertauschter Heim-/Gast-Rolle als Rückspiel angelegt.
-function erstelleGruppenplan(teamIds, anzahlGruppen, mitRueckrunde) {
+function erstelleGruppenplan(teamIds, anzahlGruppen, mitRueckrunde, spieleProMannschaft) {
   const teams = mischen(teamIds);
   const gruppen = Array.from({ length: anzahlGruppen }, (_, i) => ({
     id: neueId("gruppe"),
@@ -401,13 +473,24 @@ function erstelleGruppenplan(teamIds, anzahlGruppen, mitRueckrunde) {
 
   const spiele = [];
   gruppen.forEach((g) => {
-    for (let i = 0; i < g.teamIds.length; i++) {
-      for (let j = i + 1; j < g.teamIds.length; j++) {
-        spiele.push(neuesSpiel(g.teamIds[i], g.teamIds[j], { gruppeId: g.id, rueckspiel: false }));
-        if (mitRueckrunde) {
-          spiele.push(neuesSpiel(g.teamIds[j], g.teamIds[i], { gruppeId: g.id, rueckspiel: true }));
+    const maxProTeam = g.teamIds.length - 1;
+    const ziel = spieleProMannschaft && spieleProMannschaft < maxProTeam ? spieleProMannschaft : null;
+    if (ziel === null) {
+      for (let i = 0; i < g.teamIds.length; i++) {
+        for (let j = i + 1; j < g.teamIds.length; j++) {
+          spiele.push(neuesSpiel(g.teamIds[i], g.teamIds[j], { gruppeId: g.id, rueckspiel: false }));
+          if (mitRueckrunde) {
+            spiele.push(neuesSpiel(g.teamIds[j], g.teamIds[i], { gruppeId: g.id, rueckspiel: true }));
+          }
         }
       }
+    } else {
+      erstelleZufallsTeilplan(g.teamIds, ziel).forEach(([a, b]) => {
+        spiele.push(neuesSpiel(a, b, { gruppeId: g.id, rueckspiel: false }));
+        if (mitRueckrunde) {
+          spiele.push(neuesSpiel(b, a, { gruppeId: g.id, rueckspiel: true }));
+        }
+      });
     }
   });
 
@@ -459,6 +542,78 @@ function erstelleKoPlan(teamIds, optionen) {
   const platz3Spiel = spielUmPlatz3 && runden.length >= 2 ? neuesSpiel(null, null, {}) : null;
 
   return { modus: "ko", gruppen: null, spiele: null, runden, platz3Spiel };
+}
+
+// Auf- und Abstiegssystem ("Tische"/Ladder-Format, z. B. NFV-"Champions-League-Modus"): alle Teams
+// spielen an "anzahlTische" Tischen gleichzeitig, Tisch 1 = oberster Tisch. Nach jeder Runde rückt
+// der Sieger einen Tisch auf (Sieger von Tisch 1 bleibt oben), der Verlierer einen Tisch ab (Verlierer
+// vom untersten Tisch bleibt unten). So pendeln sich die Mannschaften über mehrere Runden auf ihr
+// tatsächliches Niveau ein. Die Property heißt bewusst "tisch", nicht "feld" - "feld" ist im Code
+// bereits für die physische Platznummer beim Zeitplan belegt (zeitenZuweisenAnListe überschreibt die).
+// Braucht eine gerade Anzahl Teams (2 pro Tisch); das wird schon im UI-Formular geprüft.
+function erstelleAufAbstiegPlan(teamIds, anzahlRunden) {
+  const teams = mischen(teamIds);
+  const anzahlTische = Math.floor(teams.length / 2);
+
+  const runde1 = Array.from({ length: anzahlTische }, (_, i) =>
+    neuesSpiel(teams[i * 2], teams[i * 2 + 1], { tisch: i + 1, sieger: null })
+  );
+  const runden = [runde1];
+  for (let r = 1; r < anzahlRunden; r++) {
+    runden.push(Array.from({ length: anzahlTische }, (_, i) => neuesSpiel(null, null, { tisch: i + 1, sieger: null })));
+  }
+
+  return { modus: "aufabstieg", gruppen: null, spiele: null, runden, anzahlTische, anzahlRunden, platz3Spiel: null };
+}
+
+// Trägt ein Ergebnis im Auf- und Abstiegssystem ein und reicht Sieger/Verlierer an die jeweils
+// richtige Tisch-Position der nächsten Runde durch. Jede Zielposition wird dabei von GENAU einem
+// Quellspiel beschrieben (kein Kollisionsrisiko, unabhängig von der Reihenfolge der Eintragung):
+// - heimId von Tisch T (T>1) = Verlierer von Tisch T-1 (rückt ab); bei Tisch 1 = eigener Sieger (bleibt oben)
+// - gastId von Tisch T (T<max) = Sieger von Tisch T+1 (rückt auf); beim untersten Tisch = eigener Verlierer (bleibt unten)
+function aufAbstiegMitErgebnis(plan, spielId, heimTore, gastTore, siegerBeiUnentschieden) {
+  const neu = JSON.parse(JSON.stringify(plan));
+  for (let r = 0; r < neu.runden.length; r++) {
+    const spiel = neu.runden[r].find((sp) => sp.id === spielId);
+    if (!spiel) continue;
+    spiel.heimTore = heimTore;
+    spiel.gastTore = gastTore;
+    let sieger = null, verlierer = null;
+    if (heimTore > gastTore) { sieger = spiel.heimId; verlierer = spiel.gastId; }
+    else if (gastTore > heimTore) { sieger = spiel.gastId; verlierer = spiel.heimId; }
+    else { sieger = siegerBeiUnentschieden || null; verlierer = sieger ? (sieger === spiel.heimId ? spiel.gastId : spiel.heimId) : null; }
+    spiel.sieger = sieger;
+
+    const naechste = neu.runden[r + 1];
+    if (naechste && sieger) {
+      const maxTisch = neu.runden[0].length;
+      const aufsteigerZiel = Math.max(1, spiel.tisch - 1);
+      const absteigerZiel = Math.min(maxTisch, spiel.tisch + 1);
+      const zielAuf = naechste.find((sp) => sp.tisch === aufsteigerZiel);
+      const zielAb = naechste.find((sp) => sp.tisch === absteigerZiel);
+      if (aufsteigerZiel === spiel.tisch) zielAuf.heimId = sieger; // Tisch 1: Sieger bleibt
+      else zielAuf.gastId = sieger; // rückt einen Tisch auf
+      if (absteigerZiel === spiel.tisch) zielAb.gastId = verlierer; // unterster Tisch: Verlierer bleibt
+      else zielAb.heimId = verlierer; // rückt einen Tisch ab
+    }
+    break;
+  }
+  return neu;
+}
+
+// Endtabelle für das Auf- und Abstiegssystem: Platzierung ergibt sich aus dem Tisch der letzten
+// Runde (Tisch 1 = Plätze 1-2, usw.), innerhalb eines Tisches entscheidet der Sieg im letzten Spiel.
+function berechneAufAbstiegTabelle(plan) {
+  const letzteRunde = [...plan.runden[plan.runden.length - 1]].sort((a, b) => a.tisch - b.tisch);
+  const eintraege = [];
+  letzteRunde.forEach((spiel) => {
+    if (!spiel.heimId) return;
+    const reihenfolge = spiel.gastId
+      ? (spiel.sieger === spiel.gastId ? [spiel.gastId, spiel.heimId] : [spiel.heimId, spiel.gastId])
+      : [spiel.heimId];
+    reihenfolge.forEach((teamId) => eintraege.push({ teamId, tisch: spiel.tisch, offen: spiel.heimTore === null }));
+  });
+  return eintraege.map((e, i) => ({ ...e, platz: i + 1 }));
 }
 
 // Addiert Minuten zu einer "HH:MM"-Uhrzeit (mit Tagesüberlauf).
@@ -557,6 +712,9 @@ function berechneTabelle(gruppe, spiele) {
 
 // Trägt ein Ergebnis (und bei K.o. den Sieger) in den Plan ein und reicht Sieger ggf. in die nächste Runde durch.
 function spielplanMitErgebnis(plan, spielId, heimTore, gastTore, siegerBeiUnentschieden) {
+  if (plan.modus === "aufabstieg") {
+    return aufAbstiegMitErgebnis(plan, spielId, heimTore, gastTore, siegerBeiUnentschieden);
+  }
   const neu = JSON.parse(JSON.stringify(plan));
 
   // Gruppenspiel? (gilt für reine Gruppenphase und die Gruppenphase von "Gruppe + K.o.-Endrunde")
@@ -773,25 +931,46 @@ async function spielplanAlsPdfHerunterladen(plan, teams, turnier) {
     }
     plan.runden.forEach((runde, i) => {
       neueZeilePruefen(12);
-      const titel = i === plan.runden.length - 1 ? "Finale" : i === plan.runden.length - 2 ? "Halbfinale" : `Runde ${i + 1}`;
+      const istAufAbstieg = plan.modus === "aufabstieg";
+      const titel = istAufAbstieg
+        ? `Runde ${i + 1}`
+        : i === plan.runden.length - 1 ? "Finale" : i === plan.runden.length - 2 ? "Halbfinale" : `Runde ${i + 1}`;
       doc.setFontSize(13);
       doc.setFont(undefined, "bold");
       doc.text(titel, 14, y);
       doc.setFont(undefined, "normal");
       y += 6;
       doc.setFontSize(8.5);
-      y = pdfTabellenzeile(doc, 14, y, spielSpalten, ["Zeit/Feld", "Heim", "Erg.", "Gast"], true);
-      runde.forEach((s) => {
+      y = pdfTabellenzeile(doc, 14, y, spielSpalten, [istAufAbstieg ? "Tisch" : "Zeit/Feld", "Heim", "Erg.", "Gast"], true);
+      const rundeSortiert = istAufAbstieg ? [...runde].sort((a, b) => a.tisch - b.tisch) : runde;
+      rundeSortiert.forEach((s) => {
         neueZeilePruefen();
         if (s.freilos) {
           y = pdfTabellenzeile(doc, 14, y, spielSpalten, ["", teamName(s.heimId), "Freilos", ""]);
         } else {
           const ergebnis = s.heimTore !== null && s.gastTore !== null ? `${s.heimTore}:${s.gastTore}` : "– : –";
-          y = pdfTabellenzeile(doc, 14, y, spielSpalten, [zeitFeldText(s), teamName(s.heimId), ergebnis, teamName(s.gastId)]);
+          const ersteSpalte = istAufAbstieg ? `Tisch ${s.tisch}` : zeitFeldText(s);
+          y = pdfTabellenzeile(doc, 14, y, spielSpalten, [ersteSpalte, teamName(s.heimId), ergebnis, teamName(s.gastId)]);
         }
       });
       y += 8;
     });
+    if (plan.modus === "aufabstieg" && plan.runden[plan.runden.length - 1].every((s) => s.heimTore !== null && s.gastTore !== null)) {
+      neueZeilePruefen(12);
+      doc.setFontSize(14);
+      doc.setFont(undefined, "bold");
+      doc.text("Endtabelle", 14, y);
+      doc.setFont(undefined, "normal");
+      y += 7;
+      doc.setFontSize(8.5);
+      const tabSpaltenAufAbstieg = [20, 130, 32];
+      y = pdfTabellenzeile(doc, 14, y, tabSpaltenAufAbstieg, ["Platz", "Verein", "Letzter Tisch"], true);
+      berechneAufAbstiegTabelle(plan).forEach((r) => {
+        neueZeilePruefen();
+        y = pdfTabellenzeile(doc, 14, y, tabSpaltenAufAbstieg, [String(r.platz), teamName(r.teamId), String(r.tisch)]);
+      });
+      y += 8;
+    }
     if (plan.platz3Spiel) {
       neueZeilePruefen(12);
       doc.setFontSize(13);
@@ -2486,7 +2665,7 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
     </div>
   ) : null;
 
-  const koBlock = plan.runden ? (
+  const koBlock = plan.runden && plan.modus !== "aufabstieg" ? (
     <div className="kc-spielplan">
       {plan.runden.map((runde, i) => (
         <div className="kc-runde-block" key={i}>
@@ -2511,6 +2690,44 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
     </div>
   ) : null;
 
+  // Auf- und Abstiegssystem: pro Runde nach Tisch sortiert anzeigen (Tisch 1 = oberster Tisch),
+  // plus Endtabelle, sobald die letzte Runde komplett eingetragen ist.
+  const aufAbstiegAlleFertig = plan.modus === "aufabstieg" &&
+    plan.runden[plan.runden.length - 1].every((s) => s.heimTore !== null && s.gastTore !== null);
+
+  const aufAbstiegBlock = plan.modus === "aufabstieg" ? (
+    <div className="kc-spielplan">
+      {plan.runden.map((runde, i) => (
+        <div className="kc-runde-block" key={i}>
+          <h3 className="kc-h3">Runde {i + 1}</h3>
+          <div className="kc-spiele-liste">
+            {[...runde].sort((a, b) => a.tisch - b.tisch).map((s) => (
+              <div key={s.id} style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <span className="kc-notiz" style={{ minWidth: "52px" }}>Tisch {s.tisch}</span>
+                <div style={{ flex: 1 }}>
+                  <SpielZeile spiel={s} teamName={teamName} bearbeitbar={bearbeitbar} onSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} zeigeSieger />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+      {aufAbstiegAlleFertig && (
+        <div className="kc-runde-block">
+          <h3 className="kc-h3">Endtabelle</h3>
+          <table className="kc-tabelle">
+            <thead><tr><th>Platz</th><th>Verein</th><th>Letzter Tisch</th></tr></thead>
+            <tbody>
+              {berechneAufAbstiegTabelle(plan).map((r) => (
+                <tr key={r.teamId}><td><strong>{r.platz}</strong></td><td>{teamName(r.teamId)}</td><td>{r.tisch}</td></tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  ) : null;
+
   return (
     <div>
       {turnier && (
@@ -2530,6 +2747,7 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
         <h3 className="kc-h3" style={{ marginTop: "18px" }}>K.o.-Endrunde</h3>
       )}
       {koBlock}
+      {aufAbstiegBlock}
     </div>
   );
 }
@@ -2616,20 +2834,29 @@ function SpielZeile({ spiel, teamName, bearbeitbar, onSpeichern, onZeitSpeichern
   );
 }
 
-// Erstellungs-Dialog: Modus frei wählbar - Liga, Gruppenphase, Gruppenturnier oder K.o.-System
-// (entspricht den 3 Turnierformen von meinspielplan.de: Liga, Gruppenturnier, Turnier/K.o.),
-// inkl. Anzahl Gruppen.
+// Erstellungs-Dialog: Modus frei wählbar - Liga, Gruppenphase oder K.o.-System (entspricht den
+// 3 Turnierformen von meinspielplan.de: Liga, Gruppenturnier, Turnier/K.o.), inkl. Anzahl Gruppen.
+// Liga/Gruppenphase können zusätzlich mit einer K.o.-Endrunde für die besten Mannschaften kombiniert
+// werden (intern weiterhin als "gruppen_ko" gespeichert) und/oder als Zufalls-Teilspielplan laufen,
+// bei dem jede Mannschaft nur gegen eine zufällige Auswahl der anderen spielt statt gegen alle.
 function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
   const [modus, setModus] = useState("liga");
   const [anzahlGruppen, setAnzahlGruppen] = useState(1);
   const [mitRueckrunde, setMitRueckrunde] = useState(false);
+  const [mitEndrunde, setMitEndrunde] = useState(false);
   const [spielUmPlatz3, setSpielUmPlatz3] = useState(false);
   const [qualifiziertProGruppe, setQualifiziertProGruppe] = useState(2);
+  const [nichtJederGegenJeden, setNichtJederGegenJeden] = useState(false);
+  const [spieleProMannschaft, setSpieleProMannschaft] = useState(4);
+  const [anzahlRunden, setAnzahlRunden] = useState(5);
   const [startzeit, setStartzeit] = useState(turnier?.uhrzeit || "09:00");
   const [spieldauerMin, setSpieldauerMin] = useState(20);
   const [anzahlFelder, setAnzahlFelder] = useState(1);
   const anzahlTeams = bestaetigteTeams.length;
   const zuWenigTeams = anzahlTeams < 2;
+  const teamsProGruppeCa = modus === "liga" ? anzahlTeams : Math.ceil(anzahlTeams / Math.max(1, anzahlGruppen));
+  const maxSpieleProMannschaft = Math.max(1, teamsProGruppeCa - 1);
+  const aufAbstiegUngeradeTeams = modus === "aufabstieg" && anzahlTeams % 2 !== 0;
 
   return (
     <div className="kc-section kc-formular-karte">
@@ -2653,13 +2880,39 @@ function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
             >
               <option value="liga">Liga (Jeder gegen Jeden – alle Mannschaften in einer Gruppe)</option>
               <option value="gruppen">Gruppenphase (mehrere Gruppen, jeder gegen jeden)</option>
-              <option value="gruppen_ko">Gruppenturnier (Gruppenphase + anschließende K.o.-Endrunde)</option>
+              <option value="aufabstieg">Auf- und Abstiegssystem (Tische, 1 Gruppe)</option>
               <option value="ko">Turnier (K.o.-System)</option>
             </select>
             {modus === "liga" && (
-              <span className="kc-notiz">Entspricht dem „Liga"-Modus auf meinspielplan.de: alle Mannschaften spielen in einer einzigen Gruppe jeder gegen jeden.</span>
+              <span className="kc-notiz">Entspricht dem „Liga"-Modus auf meinspielplan.de: alle Mannschaften spielen in einer einzigen Gruppe.</span>
+            )}
+            {modus === "aufabstieg" && (
+              <span className="kc-notiz">
+                Alle Mannschaften spielen gleichzeitig an mehreren Tischen. Nach jeder Runde rückt der Sieger einen Tisch auf, der Verlierer einen Tisch ab - so pendelt sich jede Mannschaft auf ihr Niveau ein.
+              </span>
             )}
           </label>
+          {aufAbstiegUngeradeTeams && (
+            <p className="kc-notiz" style={{ color: "var(--kc-rot, #b3261e)" }}>
+              Das Auf- und Abstiegssystem braucht eine gerade Anzahl Mannschaften (2 pro Tisch) - aktuell sind es {anzahlTeams}.
+            </p>
+          )}
+          {modus === "aufabstieg" && !aufAbstiegUngeradeTeams && (
+            <label className="kc-feld">
+              <span>Anzahl Runden</span>
+              <input
+                className="kc-input"
+                type="number"
+                min="1"
+                max="15"
+                value={anzahlRunden}
+                onChange={(e) => setAnzahlRunden(Number(e.target.value))}
+              />
+              <span className="kc-notiz">
+                {Math.floor(anzahlTeams / 2)} Tische, {Math.floor(anzahlTeams / 2) * anzahlRunden} Spiele insgesamt. Bei Unentschieden wählst du beim Ergebnis-Eintragen einen Sieger (für die Auf-/Abstieg-Bewegung) - genau wie im K.o.-System.
+              </span>
+            </label>
+          )}
           {modus === "gruppen" && (
             <label className="kc-feld">
               <span>Anzahl Gruppen</span>
@@ -2673,40 +2926,62 @@ function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
               />
             </label>
           )}
-          {modus === "gruppen_ko" && (
-            <label className="kc-feld">
-              <span>Anzahl Gruppen</span>
-              <input
-                className="kc-input"
-                type="number"
-                min="1"
-                max={Math.max(1, Math.floor(anzahlTeams / 2))}
-                value={anzahlGruppen}
-                onChange={(e) => setAnzahlGruppen(Number(e.target.value))}
-              />
-            </label>
+          {(modus === "liga" || modus === "gruppen") && (
+            <>
+              <label className="kc-checkbox-zeile">
+                <input
+                  type="checkbox"
+                  checked={nichtJederGegenJeden}
+                  onChange={(e) => {
+                    setNichtJederGegenJeden(e.target.checked);
+                    if (e.target.checked && mitRueckrunde) setMitRueckrunde(false);
+                  }}
+                />
+                <span>Nicht jeder gegen jeden – jede Mannschaft spielt nur gegen eine zufällige Auswahl</span>
+              </label>
+              {nichtJederGegenJeden && (
+                <label className="kc-feld">
+                  <span>Spiele pro Mannschaft{modus === "gruppen" ? " (je Gruppe)" : ""}</span>
+                  <input
+                    className="kc-input"
+                    type="number"
+                    min="1"
+                    max={maxSpieleProMannschaft}
+                    value={Math.min(spieleProMannschaft, maxSpieleProMannschaft)}
+                    onChange={(e) => setSpieleProMannschaft(Number(e.target.value))}
+                  />
+                  <span className="kc-notiz">
+                    Die Gegner werden per Zufallsprinzip gelost (max. {maxSpieleProMannschaft} möglich, das wäre Jeder-gegen-Jeden). Geht die Zahl bei ungerader Mannschaftsanzahl nicht ganz auf, bekommt eine zufällig gewählte Mannschaft ein Spiel mehr.
+                  </span>
+                </label>
+              )}
+              {!nichtJederGegenJeden && (
+                <label className="kc-checkbox-zeile">
+                  <input type="checkbox" checked={mitRueckrunde} onChange={(e) => setMitRueckrunde(e.target.checked)} />
+                  <span>Mit Rückrunde (jede Mannschaft spielt zweimal gegeneinander – Hin- und Rückspiel)</span>
+                </label>
+              )}
+              <label className="kc-checkbox-zeile">
+                <input type="checkbox" checked={mitEndrunde} onChange={(e) => setMitEndrunde(e.target.checked)} />
+                <span>Mit anschließender K.o.-Endrunde für die besten Mannschaften (z. B. Halbfinale + Finale)</span>
+              </label>
+              {mitEndrunde && (
+                <label className="kc-feld">
+                  <span>Wie viele Mannschaften kommen {modus === "gruppen" ? "pro Gruppe" : "insgesamt"} weiter?</span>
+                  <input
+                    className="kc-input"
+                    type="number"
+                    min="1"
+                    max={Math.max(1, Math.floor(anzahlTeams / Math.max(1, anzahlGruppen)))}
+                    value={qualifiziertProGruppe}
+                    onChange={(e) => setQualifiziertProGruppe(Number(e.target.value))}
+                  />
+                  <span className="kc-notiz">Die K.o.-Endrunde selbst wird erst gestartet, sobald alle {modus === "liga" ? "Liga" : "Gruppen"}-Spiele feststehen.</span>
+                </label>
+              )}
+            </>
           )}
-          {(modus === "liga" || modus === "gruppen" || modus === "gruppen_ko") && (
-            <label className="kc-checkbox-zeile">
-              <input type="checkbox" checked={mitRueckrunde} onChange={(e) => setMitRueckrunde(e.target.checked)} />
-              <span>Mit Rückrunde (jede Mannschaft spielt zweimal gegeneinander – Hin- und Rückspiel)</span>
-            </label>
-          )}
-          {modus === "gruppen_ko" && (
-            <label className="kc-feld">
-              <span>Wie viele Mannschaften kommen pro Gruppe weiter?</span>
-              <input
-                className="kc-input"
-                type="number"
-                min="1"
-                max={Math.max(1, Math.floor(anzahlTeams / anzahlGruppen))}
-                value={qualifiziertProGruppe}
-                onChange={(e) => setQualifiziertProGruppe(Number(e.target.value))}
-              />
-              <span className="kc-notiz">Die K.o.-Endrunde selbst wird erst gestartet, sobald alle Gruppenspiele feststehen.</span>
-            </label>
-          )}
-          {(modus === "ko" || modus === "gruppen_ko") && (
+          {(modus === "ko" || (mitEndrunde && (modus === "liga" || modus === "gruppen"))) && (
             <label className="kc-checkbox-zeile">
               <input type="checkbox" checked={spielUmPlatz3} onChange={(e) => setSpielUmPlatz3(e.target.checked)} />
               <span>Spiel um Platz 3 (zwischen den beiden Halbfinal-Verlierern)</span>
@@ -2728,16 +3003,27 @@ function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
           </label>
           <p className="kc-notiz">
             Uhrzeit und Feld werden automatisch verteilt – nach Möglichkeit mit mindestens einer Spielrunde Pause pro Mannschaft.
-            {modus === "gruppen_ko" && " Das gilt zunächst nur für die Gruppenphase, die Endrunden-Zeiten fragen wir separat ab, sobald du sie startest."}
+            {mitEndrunde && (modus === "liga" || modus === "gruppen") && " Das gilt zunächst nur für die Liga-/Gruppenspiele, die Endrunden-Zeiten fragen wir separat ab, sobald du sie startest."}
+            {modus === "aufabstieg" && ` Das gilt nur für Runde 1 - die weiteren Runden stehen ja erst nach den Ergebnissen fest und lassen sich direkt beim jeweiligen Spiel per "festlegen" verplanen.`}
           </p>
           <button
             className="kc-btn kc-btn--primary"
-            onClick={() => onErstellen(
-              modus === "liga" ? "gruppen" : modus,
-              modus === "liga" ? 1 : (modus === "gruppen" || modus === "gruppen_ko" ? anzahlGruppen : null),
-              { startzeit, spieldauerMin, anzahlFelder },
-              { mitRueckrunde, spielUmPlatz3, qualifiziertProGruppe }
-            )}
+            disabled={aufAbstiegUngeradeTeams}
+            onClick={() => {
+              const effektiverModus = (modus === "liga" || modus === "gruppen") && mitEndrunde ? "gruppen_ko" : (modus === "liga" ? "gruppen" : modus);
+              onErstellen(
+                effektiverModus,
+                modus === "liga" ? 1 : (modus === "gruppen" || effektiverModus === "gruppen_ko" ? anzahlGruppen : null),
+                { startzeit, spieldauerMin, anzahlFelder },
+                {
+                  mitRueckrunde,
+                  spielUmPlatz3,
+                  qualifiziertProGruppe,
+                  spieleProMannschaft: nichtJederGegenJeden ? Math.min(spieleProMannschaft, maxSpieleProMannschaft) : null,
+                  anzahlRunden,
+                }
+              );
+            }}
           >
             Spielplan erstellen
           </button>
@@ -3402,16 +3688,18 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     const bestaetigteIds = anmeldungen
       .filter((a) => a.turnierId === turnier.id && a.status === "bestaetigt")
       .map((a) => a.id);
-    const { mitRueckrunde, spielUmPlatz3, qualifiziertProGruppe } = zusatzOptionen || {};
+    const { mitRueckrunde, spielUmPlatz3, qualifiziertProGruppe, spieleProMannschaft, anzahlRunden } = zusatzOptionen || {};
 
     let neuerPlan;
     if (modus === "gruppen" || modus === "gruppen_ko") {
-      neuerPlan = erstelleGruppenplan(bestaetigteIds, anzahlGruppen, mitRueckrunde);
+      neuerPlan = erstelleGruppenplan(bestaetigteIds, anzahlGruppen, mitRueckrunde, spieleProMannschaft);
       if (modus === "gruppen_ko") {
         neuerPlan.modus = "gruppen_ko";
         neuerPlan.qualifiziertProGruppe = qualifiziertProGruppe || 2;
         neuerPlan.spielUmPlatz3Wunsch = !!spielUmPlatz3;
       }
+    } else if (modus === "aufabstieg") {
+      neuerPlan = erstelleAufAbstiegPlan(bestaetigteIds, anzahlRunden || 5);
     } else {
       neuerPlan = erstelleKoPlan(bestaetigteIds, { spielUmPlatz3 });
     }
