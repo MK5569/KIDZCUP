@@ -2061,7 +2061,7 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
           const belegt = belegtePlaetze(t.id);
           const frei = Math.max(0, t.maxPlaetze - belegt);
           return (
-            <div className="kc-karte" key={t.id} style={{ borderLeftColor: frei === 0 ? "var(--kc-gold)" : "var(--kc-green)" }}>
+            <div className="kc-karte" key={t.id} style={{ borderLeftColor: frei === 0 ? "var(--kc-red)" : "var(--kc-green)" }}>
               <div className="kc-karte__kopf">
                 {t.logoPfad && (
                   <img className="kc-turnier-logo" src={dateiOeffentlicheUrl(t.logoPfad)} alt={`Logo ${t.name}`} />
