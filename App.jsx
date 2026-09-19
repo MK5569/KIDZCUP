@@ -2616,10 +2616,12 @@ function SpielZeile({ spiel, teamName, bearbeitbar, onSpeichern, onZeitSpeichern
   );
 }
 
-// Erstellungs-Dialog: Modus frei wählbar (Gruppenphase oder K.o.-System), inkl. Anzahl Gruppen.
+// Erstellungs-Dialog: Modus frei wählbar - Liga, Gruppenphase, Gruppenturnier oder K.o.-System
+// (entspricht den 3 Turnierformen von meinspielplan.de: Liga, Gruppenturnier, Turnier/K.o.),
+// inkl. Anzahl Gruppen.
 function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
-  const [modus, setModus] = useState("gruppen");
-  const [anzahlGruppen, setAnzahlGruppen] = useState(2);
+  const [modus, setModus] = useState("liga");
+  const [anzahlGruppen, setAnzahlGruppen] = useState(1);
   const [mitRueckrunde, setMitRueckrunde] = useState(false);
   const [spielUmPlatz3, setSpielUmPlatz3] = useState(false);
   const [qualifiziertProGruppe, setQualifiziertProGruppe] = useState(2);
@@ -2639,13 +2641,39 @@ function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
         <div className="kc-formular">
           <label className="kc-feld">
             <span>Turnierformat</span>
-            <select className="kc-input" value={modus} onChange={(e) => setModus(e.target.value)}>
-              <option value="gruppen">Gruppenphase (jeder gegen jeden)</option>
-              <option value="gruppen_ko">Gruppenphase + anschließende K.o.-Endrunde</option>
-              <option value="ko">K.o.-System</option>
+            <select
+              className="kc-input"
+              value={modus}
+              onChange={(e) => {
+                const neu = e.target.value;
+                setModus(neu);
+                if (neu === "liga") setAnzahlGruppen(1);
+                if (neu === "gruppen" && anzahlGruppen < 2) setAnzahlGruppen(2);
+              }}
+            >
+              <option value="liga">Liga (Jeder gegen Jeden – alle Mannschaften in einer Gruppe)</option>
+              <option value="gruppen">Gruppenphase (mehrere Gruppen, jeder gegen jeden)</option>
+              <option value="gruppen_ko">Gruppenturnier (Gruppenphase + anschließende K.o.-Endrunde)</option>
+              <option value="ko">Turnier (K.o.-System)</option>
             </select>
+            {modus === "liga" && (
+              <span className="kc-notiz">Entspricht dem „Liga"-Modus auf meinspielplan.de: alle Mannschaften spielen in einer einzigen Gruppe jeder gegen jeden.</span>
+            )}
           </label>
-          {(modus === "gruppen" || modus === "gruppen_ko") && (
+          {modus === "gruppen" && (
+            <label className="kc-feld">
+              <span>Anzahl Gruppen</span>
+              <input
+                className="kc-input"
+                type="number"
+                min="2"
+                max={Math.max(2, Math.floor(anzahlTeams / 2))}
+                value={anzahlGruppen}
+                onChange={(e) => setAnzahlGruppen(Number(e.target.value))}
+              />
+            </label>
+          )}
+          {modus === "gruppen_ko" && (
             <label className="kc-feld">
               <span>Anzahl Gruppen</span>
               <input
@@ -2658,7 +2686,7 @@ function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
               />
             </label>
           )}
-          {(modus === "gruppen" || modus === "gruppen_ko") && (
+          {(modus === "liga" || modus === "gruppen" || modus === "gruppen_ko") && (
             <label className="kc-checkbox-zeile">
               <input type="checkbox" checked={mitRueckrunde} onChange={(e) => setMitRueckrunde(e.target.checked)} />
               <span>Mit Rückrunde (jede Mannschaft spielt zweimal gegeneinander – Hin- und Rückspiel)</span>
@@ -2705,8 +2733,8 @@ function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
           <button
             className="kc-btn kc-btn--primary"
             onClick={() => onErstellen(
-              modus,
-              modus === "gruppen" || modus === "gruppen_ko" ? anzahlGruppen : null,
+              modus === "liga" ? "gruppen" : modus,
+              modus === "liga" ? 1 : (modus === "gruppen" || modus === "gruppen_ko" ? anzahlGruppen : null),
               { startzeit, spieldauerMin, anzahlFelder },
               { mitRueckrunde, spielUmPlatz3, qualifiziertProGruppe }
             )}
