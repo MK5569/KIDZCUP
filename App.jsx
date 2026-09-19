@@ -1641,9 +1641,14 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
 
   // Art. 17 DSGVO: Recht auf Löschung. Der Anmeldecode dient dabei als Nachweis der Berechtigung
   // (vergleichbar einem Passwort) – nur wer ihn kennt, kann die zugehörige Anmeldung löschen.
-  const anmeldungLoeschen = async (anmeldungId) => {
+  const anmeldungLoeschen = async (anmeldung, turnier) => {
+    // Admin per Mail informieren, BEVOR die Anmeldung weg ist - so bleibt der Status
+    // (z. B. "bestätigt"/"zahlung_gemeldet") in der Mail erhalten, falls eine Rückerstattung
+    // nötig ist. Bewusst wie bei "neue_anmeldung" nur der Backend-Aufruf ohne mailto-Fallback,
+    // da ein Fallback sonst das Mail-Programm auf dem Gerät des absagenden Vereins öffnen würde.
+    benachrichtigeBackend("teilnahme_abgesagt", anmeldung, turnier);
     try {
-      await supabaseRpc("oeffentlich_anmeldung_loeschen", { p_code: anmeldungId });
+      await supabaseRpc("oeffentlich_anmeldung_loeschen", { p_code: anmeldung.id });
       setNeueAnmeldung(null);
       setGefundeneAnmeldung(null);
       setCodeSuche("");
@@ -2267,7 +2272,7 @@ function AnmeldeStatusKarte({ anmeldung, turnier, jetzt, alsBezahltMelden, fotoE
 
   const loeschenBestaetigen = () => {
     if (confirm("Anmeldung wirklich endgültig löschen? Alle gespeicherten Daten zu dieser Anmeldung werden unwiderruflich entfernt. Das kann nicht rückgängig gemacht werden.")) {
-      anmeldungLoeschen(anmeldung.id);
+      anmeldungLoeschen(anmeldung, turnier);
     }
   };
 
