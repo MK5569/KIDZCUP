@@ -317,6 +317,7 @@ function mailVorlage(typ, anmeldung, turnier) {
       text:
         `Hallo ${anmeldung.trainer || ""},\n\n` +
         `leider können wir die Anmeldung von ${anmeldung.verein} für "${turnier?.name}" (${termin}) nicht bestätigen.\n\n` +
+        (anmeldung.ablehnungsgrund ? `Grund: ${anmeldung.ablehnungsgrund}\n\n` : "") +
         `Bitte meldet euch kurz bei uns, falls ihr dazu Rückfragen habt.\n\n${gruss}`,
     };
   }
@@ -714,7 +715,12 @@ async function spielplanAlsPdfHerunterladen(plan, teams, turnier) {
   doc.setTextColor(90, 90, 90);
   doc.text(`${formatDatum(turnier.datum)} · ${turnier.ort}`, 14, y);
   doc.setTextColor(0, 0, 0);
-  y += 10;
+  y += 6;
+  doc.setFontSize(8.5);
+  doc.setTextColor(120, 120, 120);
+  doc.text(`Erstellt am ${formatDatumZeit(Date.now())}`, 14, y);
+  doc.setTextColor(0, 0, 0);
+  y += 8;
 
   // Spaltenbreiten für die Gruppentabelle (Verein, Sp, S, U, N, Tore, Pkt.) - Summe 182mm
   const tabSpalten = [66, 16, 16, 16, 16, 26, 26];
@@ -810,7 +816,10 @@ async function spielplanAlsPdfHerunterladen(plan, teams, turnier) {
 // USt-Pflichtangaben (falls sowas gebraucht wird, ist das ein separates Thema).
 function zahlungsBelegHerunterladen(anmeldung, turnier) {
   const doc = new jsPDF();
-  let y = 20;
+  let y = 16;
+
+  doc.addImage(LOGO_SRC, "JPEG", 14, y, 46, 9.5);
+  y += 9.5 + 10;
 
   doc.setFontSize(18);
   doc.text("Zahlungsbestätigung", 14, y);
@@ -902,7 +911,10 @@ function teilnehmerlisteAlsPdfHerunterladen(turnier, anmeldungen, jetzt) {
 
   const doc = new jsPDF();
   const seitenHoehe = doc.internal.pageSize.getHeight();
-  let y = 18;
+  let y = 16;
+
+  doc.addImage(LOGO_SRC, "JPEG", 14, y, 46, 9.5);
+  y += 9.5 + 8;
 
   const neueZeilePruefen = (hoehe = 7) => {
     if (y + hoehe > seitenHoehe - 15) {
@@ -1006,7 +1018,10 @@ function einnahmenAlsPdfHerunterladen(turniere, anmeldungen) {
 
   const doc = new jsPDF();
   const seitenHoehe = doc.internal.pageSize.getHeight();
-  let y = 18;
+  let y = 16;
+
+  doc.addImage(LOGO_SRC, "JPEG", 14, y, 46, 9.5);
+  y += 9.5 + 8;
 
   const neueZeilePruefen = (hoehe = 7) => {
     if (y + hoehe > seitenHoehe - 15) {
@@ -1290,6 +1305,7 @@ function anmeldungAusDb(a) {
     gebuehrenfrei: !!a.gebuehrenfrei,
     spielstaerke: a.spielstaerke || "",
     jahrgangTyp: a.jahrgang_typ || "",
+    ablehnungsgrund: a.ablehnungsgrund || "",
   };
 }
 function anmeldungZuDb(a) {
@@ -3235,9 +3251,9 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     }
   };
 
-  const anmeldungAktualisieren = async (anmeldungId, neuerStatus) => {
+  const anmeldungAktualisieren = async (anmeldungId, neuerStatus, zusatzDaten = {}) => {
     const anmeldung = anmeldungen.find((a) => a.id === anmeldungId);
-    const daten = { status: neuerStatus, bearbeitet_von: adminProfil.name || "" };
+    const daten = { status: neuerStatus, bearbeitet_von: adminProfil.name || "", ...zusatzDaten };
     if (neuerStatus === "bestaetigt") daten.bestaetigt_am = new Date().toISOString();
     const zeile = await supabaseUpdate("anmeldungen", anmeldungId, daten, session.access_token);
     const aktualisierteAnmeldung = anmeldungAusDb(zeile[0]);
@@ -3250,6 +3266,20 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
         benachrichtigen(typ, aktualisierteAnmeldung, turnier);
       }
     }
+  };
+
+  // Fragt beim Ablehnen kurz nach einem Grund (z. B. "kurzfristig abgesagt", "Platz an Warteliste
+  // vergeben") und speichert ihn mit ab - hilft später nachzuvollziehen, warum abgelehnt wurde,
+  // und wird in der "Abgelehnte"-Übersicht sowie optional in der Ablehnungsmail angezeigt.
+  // Funktioniert für jeden Status, auch für bereits bestätigte Anmeldungen, die kurzfristig
+  // absagen - damit ist die Anmeldung offiziell raus und der Platz wird für die Warteliste frei.
+  const anmeldungAblehnen = (a) => {
+    const grund = window.prompt(
+      `Grund der Ablehnung für "${a.verein}" (optional, erscheint in eurer Übersicht):`,
+      ""
+    );
+    if (grund === null) return; // Abgebrochen
+    anmeldungAktualisieren(a.id, "abgelehnt", { ablehnungsgrund: grund.trim() || null });
   };
 
   const ausWartelisteAufnehmen = async (anmeldungId) => {
@@ -3799,13 +3829,13 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                             <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAnnehmen(a.id)}>✅ Anmeldung annehmen</button>
                             <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => anmeldungKostenfreiAnnehmen(a.id)}>🆓 Kostenfrei annehmen</button>
                             <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => anmeldungAufWartelisteSetzen(a.id)}>Auf Warteliste setzen</button>
-                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "abgelehnt")}>Ablehnen</button>
+                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAblehnen(a)}>Ablehnen</button>
                           </div>
                         )}
                         {st === "zahlung_gemeldet" && (
                           <div className="kc-admin-aktionen kc-admin-aktionen--klein">
                             <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "bestaetigt")}>Bestätigen</button>
-                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "abgelehnt")}>Ablehnen</button>
+                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAblehnen(a)}>Ablehnen</button>
                           </div>
                         )}
                         {st === "ausstehend" && (
@@ -3816,7 +3846,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                             <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => erinnerungSenden(a)}>
                               ✉️ Erinnerung senden
                             </button>
-                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "abgelehnt")}>Ablehnen</button>
+                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAblehnen(a)}>Ablehnen</button>
                           </div>
                         )}
                         {st === "abgelaufen" && (
@@ -3827,7 +3857,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                             <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "bestaetigt")}>
                               ✅ Direkt bestätigen (bereits bezahlt)
                             </button>
-                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "abgelehnt")}>Ablehnen</button>
+                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAblehnen(a)}>Ablehnen</button>
                           </div>
                         )}
                         <div className="kc-admin-aktionen kc-admin-aktionen--klein">
@@ -3878,6 +3908,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                             >
                               📱 WhatsApp
                             </a>
+                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAblehnen(a)} title="Für kurzfristige Absagen - Platz wird für die Warteliste frei">Ablehnen</button>
                             <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungManuellLoeschen(a)} title="Löschung auf Anfrage, z. B. bei Auskunftsersuchen">
                               🗑 Daten löschen
                             </button>
@@ -3916,7 +3947,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                         {st === "zahlung_gemeldet" && (
                           <div className="kc-admin-aktionen kc-admin-aktionen--klein">
                             <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "bestaetigt")}>Bestätigen</button>
-                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "abgelehnt")}>Ablehnen</button>
+                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAblehnen(a)}>Ablehnen</button>
                           </div>
                         )}
                         {st === "ausstehend" && (
@@ -3927,7 +3958,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                             <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => erinnerungSenden(a)}>
                               ✉️ Erinnerung senden
                             </button>
-                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "abgelehnt")}>Ablehnen</button>
+                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAblehnen(a)}>Ablehnen</button>
                           </div>
                         )}
                         {st === "abgelaufen" && (
@@ -3938,7 +3969,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                             <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "bestaetigt")}>
                               ✅ Direkt bestätigen (bereits bezahlt)
                             </button>
-                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "abgelehnt")}>Ablehnen</button>
+                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAblehnen(a)}>Ablehnen</button>
                           </div>
                         )}
                         <div className="kc-admin-aktionen kc-admin-aktionen--klein">
@@ -3981,7 +4012,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                             >
                               {frei === 0 ? "Kein Platz frei" : "In Turnier aufnehmen"}
                             </button>
-                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "abgelehnt")}>Ablehnen</button>
+                            <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAblehnen(a)}>Ablehnen</button>
                           </div>
                         </div>
                       ))}
@@ -3998,6 +4029,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                             <div className="kc-notiz">{a.email} · {a.telefon}</div>
                             <div className="kc-notiz">Angemeldet: {formatDatumZeit(a.angemeldetAm)}</div>
                             {a.bearbeitetVon && <div className="kc-notiz">Abgelehnt von: {a.bearbeitetVon}</div>}
+                            {a.ablehnungsgrund && <div className="kc-notiz"><strong>Grund:</strong> {a.ablehnungsgrund}</div>}
                           </div>
                           <span className="kc-status-badge kc-status-badge--klein" style={{ background: STATUS_FARBE.abgelehnt }}>
                             {STATUS_LABEL.abgelehnt}
