@@ -333,6 +333,17 @@ function mailVorlage(typ, anmeldung, turnier) {
         `Ohne fristgerechte Zahlung wird der Platz erneut freigegeben.\n\n${gruss}`,
     };
   }
+  if (typ === "frist_verpasst_warteliste") {
+    return {
+      betreff: `Auf Warteliste – Zahlungsfrist verpasst (${turnier?.name || "KIDZCUP"})`,
+      text:
+        `Hallo ${anmeldung.trainer || ""},\n\n` +
+        `für die Anmeldung von ${anmeldung.verein} zum Turnier "${turnier?.name}" (${termin}) ist die Zahlungsfrist leider verstrichen, ` +
+        `ohne dass bei uns eine Zahlung eingegangen ist. Der Platz wurde daher freigegeben.\n\n` +
+        `Ihr steht jetzt auf der Warteliste - sobald wieder ein Platz frei wird, rückt ihr automatisch nach und erhaltet dann erneut 3 Tage Zeit zur Zahlung.\n\n` +
+        `Falls die Zahlung doch schon unterwegs ist oder ihr Rückfragen habt, meldet euch gerne kurz bei uns.\n\n${gruss}`,
+    };
+  }
   return { betreff: "", text: "" };
 }
 
@@ -3385,6 +3396,36 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Automatik: Anmeldungen mit Status "ausstehend", deren Zahlungsfrist überschritten ist, werden
+  // beim Laden automatisch auf die Warteliste gesetzt - blockieren dann keinen Platz mehr, ohne
+  // dass ihr das von Hand nachpflegen müsst. Bewusst NUR "ausstehend", nicht "zahlung_gemeldet":
+  // bei gemeldeter Zahlung wurde ja eventuell schon wirklich gezahlt, das solltet ihr erst prüfen,
+  // bevor der Platz freigegeben wird.
+  const abgelaufeneAutomatischVerschieben = async (liste) => {
+    const jetztTs = Date.now();
+    const betroffene = liste.filter((a) => a.status === "ausstehend" && a.frist && jetztTs > a.frist);
+    if (betroffene.length === 0) return liste;
+    let aktualisiert = liste;
+    for (const a of betroffene) {
+      try {
+        const zeile = await supabaseUpdate(
+          "anmeldungen",
+          a.id,
+          { status: "warteliste", frist: null, bearbeitet_von: "Automatisch (Zahlungsfrist überschritten)" },
+          session.access_token
+        );
+        const neu = anmeldungAusDb(zeile[0]);
+        aktualisiert = aktualisiert.map((x) => (x.id === a.id ? neu : x));
+        const turnier = turniere.find((t) => t.id === a.turnierId);
+        benachrichtigeBackend("frist_verpasst_warteliste", neu, turnier); // nur Hintergrund-Mail, kein mailto-Fallback (läuft automatisch, ohne Klick)
+      } catch (e) {
+        console.warn("Automatische Warteliste-Verschiebung fehlgeschlagen für", a.id, e.message);
+      }
+    }
+    belegungNeuLaden();
+    return aktualisiert;
+  };
+
   // Die vollen Anmeldedaten (inkl. E-Mail/Telefon) werden bewusst erst HIER geladen, mit dem
   // eigenen Admin-Zugangstoken - nicht mehr zentral beim Start der App für alle Besucher.
   useEffect(() => {
@@ -3393,7 +3434,9 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
       setAnmeldungenLaedt(true);
       try {
         const zeilen = await supabaseSelect("anmeldungen", "?select=*", session.access_token);
-        setAnmeldungen(zeilen.map(anmeldungAusDb));
+        const geladen = zeilen.map(anmeldungAusDb);
+        setAnmeldungen(geladen);
+        abgelaufeneAutomatischVerschieben(geladen).then(setAnmeldungen);
       } catch (e) {
         console.warn("Anmeldungen konnten nicht geladen werden:", e.message);
       } finally {
