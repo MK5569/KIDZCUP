@@ -12,6 +12,7 @@ const EINEN_TAG_MS = 24 * 60 * 60 * 1000;
 // Turniere verschwinden aus der Vereins-Ansicht einen Tag nach dem Turniertermin
 // (bleiben im Admin-Bereich aber weiterhin sichtbar, z. B. für CSV-Export/Archiv).
 function turnierFuerTeilnehmerSichtbar(turnier, jetzt) {
+  if (turnier.veroeffentlicht === false) return false; // Entwurf - noch nicht für Vereine freigegeben
   const sichtbarBis = new Date(turnier.datum).getTime() + 2 * EINEN_TAG_MS;
   return jetzt < sichtbarBis;
 }
@@ -1471,6 +1472,7 @@ function turnierAusDb(t) {
     iban: t.iban || "",
     kontoinhaber: t.kontoinhaber || "",
     zielgruppen: t.zielgruppen || [],
+    veroeffentlicht: t.veroeffentlicht !== false,
   };
 }
 function turnierZuDb(t) {
@@ -1479,6 +1481,7 @@ function turnierZuDb(t) {
     beschreibung: t.beschreibung || null, uhrzeit: t.uhrzeit || null, logo_pfad: t.logoPfad || null,
     iban: t.iban || null, kontoinhaber: t.kontoinhaber || null,
     zielgruppen: t.zielgruppen || [],
+    veroeffentlicht: t.veroeffentlicht !== false,
   };
 }
 
@@ -3551,6 +3554,11 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     setZeigeFormular(false);
   };
 
+  const turnierVeroeffentlichungUmschalten = async (t) => {
+    const zeile = await supabaseUpdate("turniere", t.id, { veroeffentlicht: !t.veroeffentlicht }, session.access_token);
+    setTurniere((prev) => prev.map((x) => (x.id === t.id ? turnierAusDb(zeile[0]) : x)));
+  };
+
   const turnierLoeschen = async (id) => {
     if (!confirm("Dieses Turnier wirklich löschen? Alle zugehörigen Anmeldungen und Spielpläne werden mitgelöscht.")) return;
     await supabaseDelete("turniere", id, session.access_token);
@@ -4057,9 +4065,12 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
           const frei = Math.max(0, t.maxPlaetze - belegt);
           const offen = offenesTurnier === t.id;
           return (
-            <div className="kc-karte" key={t.id} style={{ borderLeftColor: "var(--kc-blue)" }}>
+            <div className="kc-karte" key={t.id} style={{ borderLeftColor: t.veroeffentlicht === false ? "var(--kc-gold)" : "var(--kc-blue)" }}>
               <div className="kc-karte__kopf">
-                <h2 className="kc-karte__titel">{t.name}</h2>
+                <h2 className="kc-karte__titel">
+                  {t.name}
+                  {t.veroeffentlicht === false && <span className="kc-status-chip kc-status-chip--gelb" style={{ marginLeft: 8 }}>📝 Entwurf</span>}
+                </h2>
                 <div className="kc-karte__zahl">
                   <span className="kc-zahl-gross">{belegt}/{t.maxPlaetze}</span>
                   <span className="kc-zahl-label">belegt{wartelisteRegs.length > 0 ? ` · ${wartelisteRegs.length} Warteliste` : ""}</span>
@@ -4093,6 +4104,12 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                   onClick={() => { setBearbeitetesTurnier(t); setZeigeFormular(true); }}
                 >
                   Bearbeiten
+                </button>
+                <button
+                  className="kc-btn kc-btn--sekundaer"
+                  onClick={() => turnierVeroeffentlichungUmschalten(t)}
+                >
+                  {t.veroeffentlicht === false ? "✅ Veröffentlichen" : "📝 Als Entwurf zurückziehen"}
                 </button>
                 <button className="kc-btn kc-btn--sekundaer" onClick={() => setOffenerSpielplanTurnier(t)}>
                   {spielplaene.some((p) => p.turnierId === t.id) ? "Spielplan verwalten" : "Spielplan erstellen"}
@@ -4886,10 +4903,13 @@ function TurnierFormular({ bestehendesTurnier, onAbsenden, onAbbrechen }) {
           beschreibung: bestehendesTurnier.beschreibung || "",
           iban: bestehendesTurnier.iban || STANDARD_IBAN,
           kontoinhaber: bestehendesTurnier.kontoinhaber || STANDARD_KONTOINHABER,
+          veroeffentlicht: bestehendesTurnier.veroeffentlicht !== false,
         }
       : {
           name: "", datum: "", uhrzeit: "", ort: "", maxPlaetze: "16", preis: "25", zahlLink: "", beschreibung: "",
           iban: STANDARD_IBAN, kontoinhaber: STANDARD_KONTOINHABER,
+          // Neue Turniere starten standardmäßig als Entwurf - erst per Häkchen für Vereine sichtbar machen.
+          veroeffentlicht: false,
         }
   );
   const [logoDatei, setLogoDatei] = useState(null);
@@ -4922,6 +4942,17 @@ function TurnierFormular({ bestehendesTurnier, onAbsenden, onAbbrechen }) {
           onAbsenden({ ...form, maxPlaetze: Number(form.maxPlaetze), preis: Number(form.preis), logoDatei, logoEntfernen, zielgruppen });
         }}
       >
+        <label className="kc-checkbox-chip kc-veroeffentlichen-feld">
+          <input
+            type="checkbox"
+            checked={form.veroeffentlicht}
+            onChange={(e) => setForm({ ...form, veroeffentlicht: e.target.checked })}
+          />
+          <span>Turnier veröffentlichen (für Vereine sichtbar und anmeldbar)</span>
+        </label>
+        {!form.veroeffentlicht && (
+          <p className="kc-notiz">Entwurf - dieses Turnier ist noch nicht in der öffentlichen Liste sichtbar. Du kannst es jederzeit später veröffentlichen.</p>
+        )}
         <label className="kc-feld">
           <span>Turniername</span>
           <input className="kc-input" value={form.name} onChange={feld("name")} placeholder="z. B. KIDZCUP Frühjahrscup U10" required />
@@ -5095,6 +5126,7 @@ const CSS = `
   padding: 6px 12px; font-size: 13px; font-weight: 500; cursor: pointer;
 }
 .kc-checkbox-chip input { margin: 0; }
+.kc-veroeffentlichen-feld { width: fit-content; margin-bottom: 4px; }
 
 .kc-karte {
   background: var(--kc-card);
