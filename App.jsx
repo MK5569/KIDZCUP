@@ -3345,7 +3345,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
 
   const [zeigeFormular, setZeigeFormular] = useState(false);
   const [bearbeitetesTurnier, setBearbeitetesTurnier] = useState(null);
-  const [offenesTurnier, setOffenesTurnier] = useState(null);
+  const [offeneTurniere, setOffeneTurniere] = useState(() => new Set());
   const [zeigePasswortAendern, setZeigePasswortAendern] = useState(false);
   const [zeigeAdminsVerwalten, setZeigeAdminsVerwalten] = useState(false);
   const [zeigeDatenschutzTools, setZeigeDatenschutzTools] = useState(false);
@@ -3358,6 +3358,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
   const [offenerSpielplanTurnier, setOffenerSpielplanTurnier] = useState(null);
   const [adminMonatFilter, setAdminMonatFilter] = useState("");
   const [adminJugendFilter, setAdminJugendFilter] = useState("");
+  const [adminSuche, setAdminSuche] = useState("");
 
   const nachLoginProfilLaden = async (neueSession) => {
     setProfilLaedt(true);
@@ -3565,7 +3566,13 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     setTurniere((prev) => prev.filter((t) => t.id !== id));
     setAnmeldungen((prev) => prev.filter((a) => a.turnierId !== id)); // DB löscht per on-delete-cascade mit
     setSpielplaene((prev) => prev.filter((p) => p.turnierId !== id));
-    if (offenesTurnier === id) setOffenesTurnier(null);
+    if (offeneTurniere.has(id)) {
+      setOffeneTurniere((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
   };
 
   // Neuer Zwischenschritt: Admin nimmt die Anmeldung an, erst jetzt startet die Zahlungsfrist.
@@ -4020,11 +4027,22 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
           const gefiltert = sortiert.filter((t) => {
             if (adminMonatFilter !== "" && new Date(t.datum).getMonth() !== Number(adminMonatFilter)) return false;
             if (adminJugendFilter !== "" && t.zielgruppen && t.zielgruppen.length > 0 && !t.zielgruppen.includes(adminJugendFilter)) return false;
+            if (adminSuche.trim() !== "" && !t.name.toLowerCase().includes(adminSuche.trim().toLowerCase())) return false;
             return true;
           });
           return (
             <>
               <div className="kc-filter-leiste">
+                <label className="kc-feld kc-feld--suche">
+                  <span>Turnier suchen</span>
+                  <input
+                    className="kc-input"
+                    type="text"
+                    value={adminSuche}
+                    onChange={(e) => setAdminSuche(e.target.value)}
+                    placeholder="Turniername eingeben …"
+                  />
+                </label>
                 <label className="kc-feld">
                   <span>Monat</span>
                   <select className="kc-input" value={adminMonatFilter} onChange={(e) => setAdminMonatFilter(e.target.value)}>
@@ -4043,10 +4061,26 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                     ))}
                   </select>
                 </label>
-                {(adminMonatFilter !== "" || adminJugendFilter !== "") && (
-                  <button className="kc-btn kc-btn--sekundaer kc-btn--klein kc-filter-zuruecksetzen" onClick={() => { setAdminMonatFilter(""); setAdminJugendFilter(""); }}>
+                {(adminMonatFilter !== "" || adminJugendFilter !== "" || adminSuche.trim() !== "") && (
+                  <button className="kc-btn kc-btn--sekundaer kc-btn--klein kc-filter-zuruecksetzen" onClick={() => { setAdminMonatFilter(""); setAdminJugendFilter(""); setAdminSuche(""); }}>
                     Filter zurücksetzen
                   </button>
+                )}
+                {gefiltert.length > 0 && (
+                  <>
+                    <button
+                      className="kc-btn kc-btn--sekundaer kc-btn--klein"
+                      onClick={() => setOffeneTurniere(new Set(gefiltert.map((t) => t.id)))}
+                    >
+                      Alle aufklappen
+                    </button>
+                    <button
+                      className="kc-btn kc-btn--sekundaer kc-btn--klein"
+                      onClick={() => setOffeneTurniere(new Set())}
+                    >
+                      Alle einklappen
+                    </button>
+                  </>
                 )}
               </div>
               {gefiltert.length === 0 && <div className="kc-empty">Kein Turnier passt zu den gewählten Filtern.</div>}
@@ -4063,7 +4097,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
           const anzahlAbgelaufen = bearbeiteteRegs.filter((a) => effektiverStatus(a, jetzt) === "abgelaufen").length;
           const belegt = belegtePlaetze(t.id);
           const frei = Math.max(0, t.maxPlaetze - belegt);
-          const offen = offenesTurnier === t.id;
+          const offen = offeneTurniere.has(t.id);
           return (
             <div className="kc-karte" key={t.id} style={{ borderLeftColor: t.veroeffentlicht === false ? "var(--kc-gold)" : "var(--kc-blue)" }}>
               <div className="kc-karte__kopf">
@@ -4096,7 +4130,14 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                 <div><dt>Zahlungslink</dt><dd className="kc-link-truncate">{t.zahlLink || "– nicht hinterlegt –"}</dd></div>
               </dl>
               <div className="kc-admin-aktionen">
-                <button className="kc-btn kc-btn--sekundaer" onClick={() => setOffenesTurnier(offen ? null : t.id)}>
+                <button
+                  className="kc-btn kc-btn--sekundaer"
+                  onClick={() => setOffeneTurniere((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(t.id)) next.delete(t.id); else next.add(t.id);
+                    return next;
+                  })}
+                >
                   {offen ? "Anmeldungen ausblenden" : `Anmeldungen anzeigen (${regsFuerTurnier.length})`}
                 </button>
                 <button
@@ -5118,6 +5159,7 @@ const CSS = `
 .kc-liste { display: flex; flex-direction: column; gap: 14px; }
 .kc-filter-leiste { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 4px; }
 .kc-filter-leiste .kc-feld { min-width: 140px; flex: 1; }
+.kc-filter-leiste .kc-feld--suche { min-width: 200px; flex: 1.6; }
 .kc-filter-zuruecksetzen { flex-shrink: 0; }
 .kc-zielgruppen-auswahl { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
 .kc-checkbox-chip {
