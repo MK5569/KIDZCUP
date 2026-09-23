@@ -820,7 +820,7 @@ function pdfTabellenzeile(doc, x, y, spaltenBreiten, werte, kopf) {
   return y + hoehe;
 }
 
-async function spielplanAlsPdfHerunterladen(plan, teams, turnier) {
+async function spielplanAlsPdfHerunterladen(plan, teams, turnier, sponsoren = []) {
   const teamName = (id) => {
     if (!id) return "Freilos";
     if (plan.teamNamen && plan.teamNamen[id]) return plan.teamNamen[id];
@@ -845,6 +845,34 @@ async function spielplanAlsPdfHerunterladen(plan, teams, turnier) {
   } catch {
     qrDataUrl = null;
   }
+
+  // Sponsoren-Logos vorab laden und in Data-URLs umwandeln (inkl. Originalgröße fürs
+  // seitenverhältnistreue Einfügen). Einzelne fehlschlagende Logos werden einfach übersprungen.
+  const sponsorenBilder = (
+    await Promise.all(
+      (sponsoren || []).map(async (sp) => {
+        try {
+          const antwort = await fetch(dateiOeffentlicheUrl(sp.logoPfad));
+          const blob = await antwort.blob();
+          const dataUrl = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+          });
+          const groesse = await new Promise((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => resolve({ breite: img.naturalWidth, hoehe: img.naturalHeight });
+            img.onerror = reject;
+            img.src = dataUrl;
+          });
+          return { dataUrl, ...groesse };
+        } catch {
+          return null;
+        }
+      })
+    )
+  ).filter(Boolean);
 
   const doc = new jsPDF();
   const seitenHoehe = doc.internal.pageSize.getHeight();
@@ -997,6 +1025,42 @@ async function spielplanAlsPdfHerunterladen(plan, teams, turnier) {
       y = pdfTabellenzeile(doc, 14, y, spielSpalten, [zeitFeldText(s), teamName(s.heimId), ergebnis, teamName(s.gastId)]);
       y += 8;
     }
+  }
+
+  if (sponsorenBilder.length > 0) {
+    neueZeilePruefen(30);
+    y += 4;
+    doc.setDrawColor(220, 220, 220);
+    doc.line(14, y, seitenBreite - 14, y);
+    y += 7;
+    doc.setFontSize(8.5);
+    doc.setTextColor(120, 120, 120);
+    doc.text("Unsere Sponsoren", 14, y);
+    doc.setTextColor(0, 0, 0);
+    y += 6;
+    const zielHoehe = 14; // mm, Breite wird seitenverhältnistreu berechnet
+    const abstand = 6;
+    let x = 14;
+    sponsorenBilder.forEach((bild) => {
+      const breite = (bild.breite / bild.hoehe) * zielHoehe;
+      if (x + breite > seitenBreite - 14) {
+        x = 14;
+        y += zielHoehe + abstand;
+        neueZeilePruefen(zielHoehe + abstand);
+      }
+      // jsPDF unterstützt zuverlässig JPEG/PNG/WEBP - alles andere (z. B. GIF) wird
+      // übersprungen statt das ganze PDF zum Absturz zu bringen.
+      const erkanntesFormat = /^data:image\/(\w+);/.exec(bild.dataUrl)?.[1]?.toUpperCase();
+      const format = erkanntesFormat === "JPG" ? "JPEG" : erkanntesFormat;
+      if (["JPEG", "PNG", "WEBP"].includes(format)) {
+        try {
+          doc.addImage(bild.dataUrl, format, x, y, breite, zielHoehe);
+        } catch {
+          // Einzelnes Logo lässt sich nicht einbetten - restliches PDF trotzdem fertigstellen.
+        }
+      }
+      x += breite + abstand;
+    });
   }
 
   doc.save(`spielplan-${turnier.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.pdf`);
@@ -1543,6 +1607,9 @@ function dokumentAusDb(d) {
 function dokumentZuDb(d) {
   return { id: d.id, turnier_id: d.turnierId || null, titel: d.titel, dateiname: d.dateiname, pfad: d.pfad, typ: d.typ, groesse: d.groesse, hochgeladen_von: d.hochgeladenVon || null };
 }
+function sponsorAusDb(s) {
+  return { id: s.id, turnierId: s.turnier_id, logoPfad: s.logo_pfad, name: s.name || "", reihenfolge: s.reihenfolge ?? 0 };
+}
 
 // ---------- Hauptkomponente ----------
 
@@ -1588,7 +1655,16 @@ export default function App() {
         supabaseSelect("spielplaene", "?select=*"),
         supabaseSelect("dokumente", "?select=*&order=hochgeladen_am.desc"),
       ]);
-      setTurniere(t.map(turnierAusDb));
+      // Sponsoren-Logos separat laden: Falls die Tabelle (neue Funktion) noch nicht per
+      // SQL-Migration angelegt wurde, soll das den Rest des Ladevorgangs nicht blockieren.
+      let sponsorenListe = [];
+      try {
+        const sp = await supabaseSelect("turnier_sponsoren", "?select=*&order=reihenfolge.asc");
+        sponsorenListe = sp.map(sponsorAusDb);
+      } catch (e) {
+        console.warn("Sponsoren-Logos konnten nicht geladen werden:", e.message);
+      }
+      setTurniere(t.map(turnierAusDb).map((tu) => ({ ...tu, sponsoren: sponsorenListe.filter((sp) => sp.turnierId === tu.id) })));
       setSpielplaene(s.map(spielplanAusDb));
       setDokumente(d.map(dokumentAusDb));
       await belegungNeuLaden();
@@ -2746,7 +2822,7 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
     <div>
       {turnier && (
         <div className="kc-spielplan-aktionen">
-          <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => spielplanAlsPdfHerunterladen(plan, teams, turnier)}>
+          <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => spielplanAlsPdfHerunterladen(plan, teams, turnier, turnier.sponsoren)}>
             📄 Als PDF herunterladen
           </button>
         </div>
@@ -2762,6 +2838,16 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
       )}
       {koBlock}
       {aufAbstiegBlock}
+      {turnier && turnier.sponsoren && turnier.sponsoren.length > 0 && (
+        <div className="kc-sponsoren-leiste">
+          <span className="kc-sponsoren-leiste__label">Unsere Sponsoren</span>
+          <div className="kc-sponsoren-leiste__logos">
+            {turnier.sponsoren.map((sp) => (
+              <img key={sp.id} src={dateiOeffentlicheUrl(sp.logoPfad)} alt="Sponsor-Logo" />
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -3346,6 +3432,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
   const [zeigeFormular, setZeigeFormular] = useState(false);
   const [bearbeitetesTurnier, setBearbeitetesTurnier] = useState(null);
   const [offeneTurniere, setOffeneTurniere] = useState(() => new Set());
+  const [offeneSponsoren, setOffeneSponsoren] = useState(() => new Set());
   const [zeigePasswortAendern, setZeigePasswortAendern] = useState(false);
   const [zeigeAdminsVerwalten, setZeigeAdminsVerwalten] = useState(false);
   const [zeigeDatenschutzTools, setZeigeDatenschutzTools] = useState(false);
@@ -3550,19 +3637,60 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
       alert("Hinweis: Logo-Änderung konnte nicht vollständig gespeichert werden: " + e.message);
     }
     const zeile = await supabaseUpdate("turniere", id, turnierZuDb({ id, ...restDaten, logoPfad }), session.access_token);
-    setTurniere((prev) => prev.map((t) => (t.id === id ? turnierAusDb(zeile[0]) : t)));
+    setTurniere((prev) => prev.map((t) => (t.id === id ? { ...turnierAusDb(zeile[0]), sponsoren: t.sponsoren } : t)));
     setBearbeitetesTurnier(null);
     setZeigeFormular(false);
   };
 
   const turnierVeroeffentlichungUmschalten = async (t) => {
-    const zeile = await supabaseUpdate("turniere", t.id, { veroeffentlicht: !t.veroeffentlicht }, session.access_token);
-    setTurniere((prev) => prev.map((x) => (x.id === t.id ? turnierAusDb(zeile[0]) : x)));
+    try {
+      const zeile = await supabaseUpdate("turniere", t.id, { veroeffentlicht: !t.veroeffentlicht }, session.access_token);
+      setTurniere((prev) => prev.map((x) => (x.id === t.id ? { ...turnierAusDb(zeile[0]), sponsoren: x.sponsoren } : x)));
+    } catch (e) {
+      alert("Veröffentlichungsstatus konnte nicht geändert werden: " + e.message);
+    }
+  };
+
+  const sponsorHochladen = async (turnier, datei) => {
+    if (!["image/png", "image/jpeg", "image/webp"].includes(datei.type)) {
+      alert("Bitte ein Logo im Format PNG, JPEG oder WEBP hochladen (andere Formate lassen sich nicht ins PDF einbetten).");
+      return;
+    }
+    try {
+      const endung = datei.name.includes(".") ? datei.name.slice(datei.name.lastIndexOf(".")) : "";
+      const pfad = `sponsoren/${turnier.id}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}${endung}`;
+      await supabaseDateiHochladen(pfad, datei, session.access_token);
+      const zeile = await supabaseInsert(
+        "turnier_sponsoren",
+        { turnier_id: turnier.id, logo_pfad: pfad, reihenfolge: (turnier.sponsoren || []).length },
+        session.access_token
+      );
+      const neuerSponsor = sponsorAusDb(zeile[0]);
+      setTurniere((prev) => prev.map((t) => (t.id === turnier.id ? { ...t, sponsoren: [...(t.sponsoren || []), neuerSponsor] } : t)));
+    } catch (e) {
+      alert("Sponsoren-Logo konnte nicht hochgeladen werden: " + e.message);
+    }
+  };
+
+  const sponsorLoeschen = async (turnier, sponsor) => {
+    try {
+      await supabaseDateiLoeschen(sponsor.logoPfad, session.access_token);
+      await supabaseDelete("turnier_sponsoren", sponsor.id, session.access_token);
+      setTurniere((prev) => prev.map((t) => (t.id === turnier.id ? { ...t, sponsoren: (t.sponsoren || []).filter((s) => s.id !== sponsor.id) } : t)));
+    } catch (e) {
+      alert("Sponsoren-Logo konnte nicht entfernt werden: " + e.message);
+    }
   };
 
   const turnierLoeschen = async (id) => {
     if (!confirm("Dieses Turnier wirklich löschen? Alle zugehörigen Anmeldungen und Spielpläne werden mitgelöscht.")) return;
-    await supabaseDelete("turniere", id, session.access_token);
+    const turnier = turniere.find((t) => t.id === id);
+    try {
+      await supabaseDelete("turniere", id, session.access_token);
+    } catch (e) {
+      alert("Turnier konnte nicht gelöscht werden: " + e.message);
+      return;
+    }
     setTurniere((prev) => prev.filter((t) => t.id !== id));
     setAnmeldungen((prev) => prev.filter((a) => a.turnierId !== id)); // DB löscht per on-delete-cascade mit
     setSpielplaene((prev) => prev.filter((p) => p.turnierId !== id));
@@ -3573,53 +3701,84 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
         return next;
       });
     }
+    if (offeneSponsoren.has(id)) {
+      setOffeneSponsoren((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
+    // Turnier ist in der Datenbank bereits weg - jetzt noch die verwaisten Dateien im Storage
+    // aufräumen (Logo + Sponsoren-Logos). Rein kosmetisch, schlägt bewusst leise fehl.
+    if (turnier) {
+      const aufzuraeumendePfade = [turnier.logoPfad, ...((turnier.sponsoren || []).map((s) => s.logoPfad))].filter(Boolean);
+      for (const pfad of aufzuraeumendePfade) {
+        try {
+          await supabaseDateiLoeschen(pfad, session.access_token);
+        } catch (e) {
+          console.warn("Datei konnte nach Turnier-Löschung nicht aufgeräumt werden:", pfad, e.message);
+        }
+      }
+    }
   };
 
   // Neuer Zwischenschritt: Admin nimmt die Anmeldung an, erst jetzt startet die Zahlungsfrist.
   const anmeldungAnnehmen = async (anmeldungId) => {
     const anmeldung = anmeldungen.find((a) => a.id === anmeldungId);
     const neueFrist = Date.now() + DREI_TAGE_MS;
-    const zeile = await supabaseUpdate(
-      "anmeldungen", anmeldungId,
-      { status: "ausstehend", frist: new Date(neueFrist).toISOString(), bearbeitet_von: adminProfil.name || "" },
-      session.access_token
-    );
-    const aktualisierteAnmeldung = anmeldungAusDb(zeile[0]);
-    setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
-    belegungNeuLaden();
-    if (anmeldung) {
-      const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
-      benachrichtigen("angenommen", aktualisierteAnmeldung, turnier);
+    try {
+      const zeile = await supabaseUpdate(
+        "anmeldungen", anmeldungId,
+        { status: "ausstehend", frist: new Date(neueFrist).toISOString(), bearbeitet_von: adminProfil.name || "" },
+        session.access_token
+      );
+      const aktualisierteAnmeldung = anmeldungAusDb(zeile[0]);
+      setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
+      belegungNeuLaden();
+      if (anmeldung) {
+        const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
+        benachrichtigen("angenommen", aktualisierteAnmeldung, turnier);
+      }
+    } catch (e) {
+      alert("Anmeldung konnte nicht angenommen werden: " + e.message);
     }
   };
 
   // Admin kann eine neu eingegangene Anmeldung auch bewusst auf die Warteliste setzen,
   // z. B. um zunächst Kapazität für andere/bevorzugte Vereine freizuhalten.
   const anmeldungAufWartelisteSetzen = async (anmeldungId) => {
-    const zeile = await supabaseUpdate(
-      "anmeldungen", anmeldungId,
-      { status: "warteliste", frist: null, bearbeitet_von: adminProfil.name || "" },
-      session.access_token
-    );
-    const aktualisierteAnmeldung = anmeldungAusDb(zeile[0]);
-    setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
-    belegungNeuLaden();
+    try {
+      const zeile = await supabaseUpdate(
+        "anmeldungen", anmeldungId,
+        { status: "warteliste", frist: null, bearbeitet_von: adminProfil.name || "" },
+        session.access_token
+      );
+      const aktualisierteAnmeldung = anmeldungAusDb(zeile[0]);
+      setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
+      belegungNeuLaden();
+    } catch (e) {
+      alert("Anmeldung konnte nicht auf die Warteliste gesetzt werden: " + e.message);
+    }
   };
 
   // Für Mannschaften, die keine Startgebühr zahlen müssen: direkt bestätigen, ganz ohne Zahlungsschritt.
   const anmeldungKostenfreiAnnehmen = async (anmeldungId) => {
     const anmeldung = anmeldungen.find((a) => a.id === anmeldungId);
-    const zeile = await supabaseUpdate(
-      "anmeldungen", anmeldungId,
-      { status: "bestaetigt", gebuehrenfrei: true, bestaetigt_am: new Date().toISOString(), bearbeitet_von: adminProfil.name || "" },
-      session.access_token
-    );
-    const aktualisierteAnmeldung = anmeldungAusDb(zeile[0]);
-    setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
-    belegungNeuLaden();
-    if (anmeldung) {
-      const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
-      benachrichtigen("bestaetigung", aktualisierteAnmeldung, turnier);
+    try {
+      const zeile = await supabaseUpdate(
+        "anmeldungen", anmeldungId,
+        { status: "bestaetigt", gebuehrenfrei: true, bestaetigt_am: new Date().toISOString(), bearbeitet_von: adminProfil.name || "" },
+        session.access_token
+      );
+      const aktualisierteAnmeldung = anmeldungAusDb(zeile[0]);
+      setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
+      belegungNeuLaden();
+      if (anmeldung) {
+        const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
+        benachrichtigen("bestaetigung", aktualisierteAnmeldung, turnier);
+      }
+    } catch (e) {
+      alert("Anmeldung konnte nicht kostenfrei bestätigt werden: " + e.message);
     }
   };
 
@@ -3627,16 +3786,20 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     const anmeldung = anmeldungen.find((a) => a.id === anmeldungId);
     const daten = { status: neuerStatus, bearbeitet_von: adminProfil.name || "", ...zusatzDaten };
     if (neuerStatus === "bestaetigt") daten.bestaetigt_am = new Date().toISOString();
-    const zeile = await supabaseUpdate("anmeldungen", anmeldungId, daten, session.access_token);
-    const aktualisierteAnmeldung = anmeldungAusDb(zeile[0]);
-    setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
-    belegungNeuLaden();
-    if (anmeldung) {
-      const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
-      const typ = neuerStatus === "bestaetigt" ? "bestaetigung" : neuerStatus === "abgelehnt" ? "ablehnung" : null;
-      if (typ) {
-        benachrichtigen(typ, aktualisierteAnmeldung, turnier);
+    try {
+      const zeile = await supabaseUpdate("anmeldungen", anmeldungId, daten, session.access_token);
+      const aktualisierteAnmeldung = anmeldungAusDb(zeile[0]);
+      setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
+      belegungNeuLaden();
+      if (anmeldung) {
+        const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
+        const typ = neuerStatus === "bestaetigt" ? "bestaetigung" : neuerStatus === "abgelehnt" ? "ablehnung" : null;
+        if (typ) {
+          benachrichtigen(typ, aktualisierteAnmeldung, turnier);
+        }
       }
+    } catch (e) {
+      alert("Status konnte nicht geändert werden: " + e.message);
     }
   };
 
@@ -3657,17 +3820,21 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
   const ausWartelisteAufnehmen = async (anmeldungId) => {
     const anmeldung = anmeldungen.find((a) => a.id === anmeldungId);
     const neueFrist = Date.now() + DREI_TAGE_MS;
-    const zeile = await supabaseUpdate(
-      "anmeldungen", anmeldungId,
-      { status: "ausstehend", frist: new Date(neueFrist).toISOString(), bearbeitet_von: adminProfil.name || "" },
-      session.access_token
-    );
-    const aktualisierteAnmeldung = anmeldungAusDb(zeile[0]);
-    setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
-    belegungNeuLaden();
-    if (anmeldung) {
-      const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
-      benachrichtigen("warteliste_aufnahme", aktualisierteAnmeldung, turnier);
+    try {
+      const zeile = await supabaseUpdate(
+        "anmeldungen", anmeldungId,
+        { status: "ausstehend", frist: new Date(neueFrist).toISOString(), bearbeitet_von: adminProfil.name || "" },
+        session.access_token
+      );
+      const aktualisierteAnmeldung = anmeldungAusDb(zeile[0]);
+      setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
+      belegungNeuLaden();
+      if (anmeldung) {
+        const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
+        benachrichtigen("warteliste_aufnahme", aktualisierteAnmeldung, turnier);
+      }
+    } catch (e) {
+      alert("Mannschaft konnte nicht aus der Warteliste aufgenommen werden: " + e.message);
     }
   };
 
@@ -3681,17 +3848,21 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
   const fristVerlaengern = async (anmeldungId) => {
     const anmeldung = anmeldungen.find((a) => a.id === anmeldungId);
     const neueFrist = Date.now() + DREI_TAGE_MS;
-    const zeile = await supabaseUpdate(
-      "anmeldungen", anmeldungId,
-      { frist: new Date(neueFrist).toISOString(), bearbeitet_von: adminProfil.name || "" },
-      session.access_token
-    );
-    const aktualisierteAnmeldung = anmeldungAusDb(zeile[0]);
-    setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
-    belegungNeuLaden();
-    if (anmeldung) {
-      const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
-      benachrichtigen("frist_verlaengert", aktualisierteAnmeldung, turnier);
+    try {
+      const zeile = await supabaseUpdate(
+        "anmeldungen", anmeldungId,
+        { frist: new Date(neueFrist).toISOString(), bearbeitet_von: adminProfil.name || "" },
+        session.access_token
+      );
+      const aktualisierteAnmeldung = anmeldungAusDb(zeile[0]);
+      setAnmeldungen((prev) => prev.map((a) => (a.id === anmeldungId ? aktualisierteAnmeldung : a)));
+      belegungNeuLaden();
+      if (anmeldung) {
+        const turnier = turniere.find((t) => t.id === anmeldung.turnierId);
+        benachrichtigen("frist_verlaengert", aktualisierteAnmeldung, turnier);
+      }
+    } catch (e) {
+      alert("Frist konnte nicht verlängert werden: " + e.message);
     }
   };
 
@@ -3726,20 +3897,28 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     } catch (e) {
       console.warn("Löschprotokoll konnte nicht gespeichert werden:", e.message);
     }
-    await supabaseDelete("anmeldungen", anmeldung.id, session.access_token);
-    setAnmeldungen((prev) => prev.filter((a) => a.id !== anmeldung.id));
-    belegungNeuLaden();
+    try {
+      await supabaseDelete("anmeldungen", anmeldung.id, session.access_token);
+      setAnmeldungen((prev) => prev.filter((a) => a.id !== anmeldung.id));
+      belegungNeuLaden();
+    } catch (e) {
+      alert("Anmeldung konnte nicht gelöscht werden: " + e.message);
+    }
   };
 
   // Löschkonzept: personenbezogene Anmeldedaten zu Turnieren, die lange zurückliegen, bereinigen.
   const altdatenLoeschen = async (turnier) => {
     const betroffen = anmeldungen.filter((a) => a.turnierId === turnier.id).length;
     if (!confirm(`Alle ${betroffen} Anmeldung(en) zu "${turnier.name}" (${formatDatum(turnier.datum)}) endgültig löschen? Das Turnier selbst (ohne personenbezogene Daten) bleibt erhalten.`)) return;
-    await supabaseDeleteWhere("anmeldungen", `?turnier_id=eq.${turnier.id}`, session.access_token);
-    await supabaseDeleteWhere("spielplaene", `?turnier_id=eq.${turnier.id}`, session.access_token);
-    setAnmeldungen((prev) => prev.filter((a) => a.turnierId !== turnier.id));
-    setSpielplaene((prev) => prev.filter((p) => p.turnierId !== turnier.id));
-    belegungNeuLaden();
+    try {
+      await supabaseDeleteWhere("anmeldungen", `?turnier_id=eq.${turnier.id}`, session.access_token);
+      await supabaseDeleteWhere("spielplaene", `?turnier_id=eq.${turnier.id}`, session.access_token);
+      setAnmeldungen((prev) => prev.filter((a) => a.turnierId !== turnier.id));
+      setSpielplaene((prev) => prev.filter((p) => p.turnierId !== turnier.id));
+      belegungNeuLaden();
+    } catch (e) {
+      alert("Altdaten konnten nicht vollständig gelöscht werden: " + e.message);
+    }
   };
 
   const spielplanErstellen = async (turnier, modus, anzahlGruppen, zeitOptionen, zusatzOptionen) => {
@@ -3762,10 +3941,14 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
       neuerPlan = erstelleKoPlan(bestaetigteIds, { spielUmPlatz3 });
     }
     if (zeitOptionen) neuerPlan = planMitZeitenUndFeldern(neuerPlan, zeitOptionen);
-    await supabaseDeleteWhere("spielplaene", `?turnier_id=eq.${turnier.id}`, session.access_token);
-    const roh = { id: neueId("plan"), turnierId: turnier.id, erstelltAm: Date.now(), ...neuerPlan };
-    const zeile = await supabaseInsert("spielplaene", spielplanZuDb(roh), session.access_token);
-    setSpielplaene((prev) => [...prev.filter((p) => p.turnierId !== turnier.id), spielplanAusDb(zeile[0])]);
+    try {
+      await supabaseDeleteWhere("spielplaene", `?turnier_id=eq.${turnier.id}`, session.access_token);
+      const roh = { id: neueId("plan"), turnierId: turnier.id, erstelltAm: Date.now(), ...neuerPlan };
+      const zeile = await supabaseInsert("spielplaene", spielplanZuDb(roh), session.access_token);
+      setSpielplaene((prev) => [...prev.filter((p) => p.turnierId !== turnier.id), spielplanAusDb(zeile[0])]);
+    } catch (e) {
+      alert("Spielplan konnte nicht erstellt werden: " + e.message);
+    }
   };
 
   // Startet die K.o.-Endrunde einer "Gruppe + Endrunde"-Kombination: ermittelt die besten N Teams
@@ -3786,22 +3969,34 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
       zeitenZuweisenAnListe(planbar, zeitOptionen);
     }
     const aktualisiert = { ...plan, runden: koTeil.runden, platz3Spiel: koTeil.platz3Spiel };
-    const zeile = await supabaseUpdate("spielplaene", plan.id, spielplanZuDb(aktualisiert), session.access_token);
-    setSpielplaene((prev) => prev.map((p) => (p.id === plan.id ? spielplanAusDb(zeile[0]) : p)));
+    try {
+      const zeile = await supabaseUpdate("spielplaene", plan.id, spielplanZuDb(aktualisiert), session.access_token);
+      setSpielplaene((prev) => prev.map((p) => (p.id === plan.id ? spielplanAusDb(zeile[0]) : p)));
+    } catch (e) {
+      alert("Endrunde konnte nicht gestartet werden: " + e.message);
+    }
   };
 
   const spielplanNeuErstellen = async (turnier) => {
     if (!confirm("Bestehenden Spielplan wirklich verwerfen? Alle eingetragenen Ergebnisse gehen dabei verloren.")) return;
-    await supabaseDeleteWhere("spielplaene", `?turnier_id=eq.${turnier.id}`, session.access_token);
-    setSpielplaene((prev) => prev.filter((p) => p.turnierId !== turnier.id));
+    try {
+      await supabaseDeleteWhere("spielplaene", `?turnier_id=eq.${turnier.id}`, session.access_token);
+      setSpielplaene((prev) => prev.filter((p) => p.turnierId !== turnier.id));
+    } catch (e) {
+      alert("Spielplan konnte nicht verworfen werden: " + e.message);
+    }
   };
 
   const spielSpeichern = async (turnierId, spielId, heimTore, gastTore, siegerBeiUnentschieden) => {
     const plan = spielplaene.find((p) => p.turnierId === turnierId);
     if (!plan) return;
     const aktualisiert = spielplanMitErgebnis(plan, spielId, heimTore, gastTore, siegerBeiUnentschieden);
-    const zeile = await supabaseUpdate("spielplaene", plan.id, spielplanZuDb(aktualisiert), session.access_token);
-    setSpielplaene((prev) => prev.map((p) => (p.id === plan.id ? spielplanAusDb(zeile[0]) : p)));
+    try {
+      const zeile = await supabaseUpdate("spielplaene", plan.id, spielplanZuDb(aktualisiert), session.access_token);
+      setSpielplaene((prev) => prev.map((p) => (p.id === plan.id ? spielplanAusDb(zeile[0]) : p)));
+    } catch (e) {
+      alert("Ergebnis konnte nicht gespeichert werden: " + e.message);
+    }
   };
 
   // Manuelle Anpassung von Uhrzeit/Feld - z. B. bei Verzögerungen am Turniertag. Über den
@@ -3810,8 +4005,12 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     const plan = spielplaene.find((p) => p.turnierId === turnierId);
     if (!plan) return;
     const aktualisiert = spielplanMitZeit(plan, spielId, uhrzeit, feld);
-    const zeile = await supabaseUpdate("spielplaene", plan.id, spielplanZuDb(aktualisiert), session.access_token);
-    setSpielplaene((prev) => prev.map((p) => (p.id === plan.id ? spielplanAusDb(zeile[0]) : p)));
+    try {
+      const zeile = await supabaseUpdate("spielplaene", plan.id, spielplanZuDb(aktualisiert), session.access_token);
+      setSpielplaene((prev) => prev.map((p) => (p.id === plan.id ? spielplanAusDb(zeile[0]) : p)));
+    } catch (e) {
+      alert("Zeit/Feld konnte nicht gespeichert werden: " + e.message);
+    }
   };
 
   // Ändert nur die Anzeige im Spielplan (z. B. "Kickers Lila" statt zweimal "Kickers"),
@@ -3823,21 +4022,29 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     if (name && name.trim()) neueNamen[teamId] = name.trim();
     else delete neueNamen[teamId];
     const aktualisiert = { ...plan, teamNamen: neueNamen };
-    const zeile = await supabaseUpdate("spielplaene", plan.id, spielplanZuDb(aktualisiert), session.access_token);
-    setSpielplaene((prev) => prev.map((p) => (p.id === plan.id ? spielplanAusDb(zeile[0]) : p)));
+    try {
+      const zeile = await supabaseUpdate("spielplaene", plan.id, spielplanZuDb(aktualisiert), session.access_token);
+      setSpielplaene((prev) => prev.map((p) => (p.id === plan.id ? spielplanAusDb(zeile[0]) : p)));
+    } catch (e) {
+      alert("Anzeigename konnte nicht gespeichert werden: " + e.message);
+    }
   };
 
   const dokumentHochladen = async (datei, titel, turnierId) => {
     const id = neueId("dok");
     const dateiendung = datei.name.includes(".") ? datei.name.slice(datei.name.lastIndexOf(".")) : "";
     const pfad = `${turnierId || "allgemein"}/${id}${dateiendung}`;
-    await supabaseDateiHochladen(pfad, datei, session.access_token);
-    const roh = {
-      id, turnierId: turnierId || null, titel: titel || datei.name, dateiname: datei.name,
-      pfad, typ: datei.type, groesse: datei.size, hochgeladenVon: adminProfil.name,
-    };
-    const zeile = await supabaseInsert("dokumente", dokumentZuDb(roh), session.access_token);
-    setDokumente((prev) => [dokumentAusDb(zeile[0]), ...prev]);
+    try {
+      await supabaseDateiHochladen(pfad, datei, session.access_token);
+      const roh = {
+        id, turnierId: turnierId || null, titel: titel || datei.name, dateiname: datei.name,
+        pfad, typ: datei.type, groesse: datei.size, hochgeladenVon: adminProfil.name,
+      };
+      const zeile = await supabaseInsert("dokumente", dokumentZuDb(roh), session.access_token);
+      setDokumente((prev) => [dokumentAusDb(zeile[0]), ...prev]);
+    } catch (e) {
+      alert("Dokument konnte nicht hochgeladen werden: " + e.message);
+    }
   };
 
   const dokumentLoeschen = async (dokument) => {
@@ -3870,14 +4077,22 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
   };
 
   const sponsorAnfrageMarkieren = async (id, bearbeitet) => {
-    const zeile = await supabaseUpdate("sponsoren", id, { bearbeitet }, session.access_token);
-    setSponsorAnfragen((prev) => prev.map((s) => (s.id === id ? zeile[0] : s)));
+    try {
+      const zeile = await supabaseUpdate("sponsoren", id, { bearbeitet }, session.access_token);
+      setSponsorAnfragen((prev) => prev.map((s) => (s.id === id ? zeile[0] : s)));
+    } catch (e) {
+      alert("Sponsor-Anfrage konnte nicht aktualisiert werden: " + e.message);
+    }
   };
 
   const sponsorAnfrageLoeschen = async (id) => {
     if (!confirm("Diese Sponsor-Anfrage wirklich löschen?")) return;
-    await supabaseDelete("sponsoren", id, session.access_token);
-    setSponsorAnfragen((prev) => prev.filter((s) => s.id !== id));
+    try {
+      await supabaseDelete("sponsoren", id, session.access_token);
+      setSponsorAnfragen((prev) => prev.filter((s) => s.id !== id));
+    } catch (e) {
+      alert("Sponsor-Anfrage konnte nicht gelöscht werden: " + e.message);
+    }
   };
 
   if (offenerSpielplanTurnier) {
@@ -4152,6 +4367,16 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                 >
                   {t.veroeffentlicht === false ? "✅ Veröffentlichen" : "📝 Als Entwurf zurückziehen"}
                 </button>
+                <button
+                  className="kc-btn kc-btn--sekundaer"
+                  onClick={() => setOffeneSponsoren((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(t.id)) next.delete(t.id); else next.add(t.id);
+                    return next;
+                  })}
+                >
+                  🏷️ Sponsoren{(t.sponsoren || []).length > 0 ? ` (${t.sponsoren.length})` : ""}
+                </button>
                 <button className="kc-btn kc-btn--sekundaer" onClick={() => setOffenerSpielplanTurnier(t)}>
                   {spielplaene.some((p) => p.turnierId === t.id) ? "Spielplan verwalten" : "Spielplan erstellen"}
                 </button>
@@ -4208,6 +4433,39 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                   <button className="kc-btn kc-btn--sekundaer kc-btn--klein" style={{ marginTop: "8px" }} onClick={() => setVcfExport(null)}>
                     Schließen
                   </button>
+                </div>
+              )}
+
+              {offeneSponsoren.has(t.id) && (
+                <div className="kc-sponsoren-panel">
+                  <p className="kc-notiz">
+                    Logos erscheinen unten auf dem Spielplan – online und im PDF. Erlaubt: PNG, JPEG oder WEBP,
+                    am besten mit transparentem Hintergrund (PNG).
+                  </p>
+                  <div className="kc-sponsoren-liste">
+                    {(t.sponsoren || []).length === 0 && <span className="kc-notiz">Noch keine Sponsoren-Logos hochgeladen.</span>}
+                    {(t.sponsoren || []).map((sp) => (
+                      <div className="kc-sponsor-eintrag" key={sp.id}>
+                        <img src={dateiOeffentlicheUrl(sp.logoPfad)} alt="Sponsor-Logo" />
+                        <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => sponsorLoeschen(t, sp)}>
+                          Entfernen
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <label className="kc-btn kc-btn--sekundaer kc-btn--klein kc-sponsor-upload-btn">
+                    + Logo hochladen
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp"
+                      style={{ display: "none" }}
+                      onChange={(e) => {
+                        const datei = e.target.files[0];
+                        if (datei) sponsorHochladen(t, datei);
+                        e.target.value = "";
+                      }}
+                    />
+                  </label>
                 </div>
               )}
 
@@ -5286,6 +5544,15 @@ const CSS = `
 .kc-bestaetigt-block { background: #F0F8F3; border: 1.5px solid var(--kc-green); border-radius: 10px; padding: 10px 12px 4px; margin-bottom: 4px; display: flex; flex-direction: column; gap: 12px; }
 .kc-vcf-hinweis { background: #FCF3DC; border: 1.5px solid #E0A100; border-radius: 10px; padding: 12px 14px; margin-top: 10px; }
 .kc-vcf-hinweis p { margin: 0 0 10px; font-size: 13px; color: #7A5A00; line-height: 1.5; }
+.kc-sponsoren-panel { background: #F4F6F7; border: 1.5px solid #D8DEE2; border-radius: 10px; padding: 12px 14px; margin-top: 10px; }
+.kc-sponsoren-liste { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0; }
+.kc-sponsor-eintrag { display: flex; flex-direction: column; align-items: center; gap: 6px; background: #fff; border: 1px solid #D8DEE2; border-radius: 8px; padding: 8px; }
+.kc-sponsor-eintrag img { max-width: 90px; max-height: 50px; object-fit: contain; }
+.kc-sponsor-upload-btn { cursor: pointer; display: inline-flex; }
+.kc-sponsoren-leiste { margin-top: 24px; padding-top: 16px; border-top: 1px solid #D8DEE2; }
+.kc-sponsoren-leiste__label { display: block; font-size: 11.5px; color: #5A6472; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 10px; }
+.kc-sponsoren-leiste__logos { display: flex; flex-wrap: wrap; align-items: center; gap: 18px; }
+.kc-sponsoren-leiste__logos img { max-height: 42px; max-width: 130px; object-fit: contain; }
 .kc-h3--bestaetigt { color: var(--kc-green); margin-top: 0; }
 
 .kc-btn--block { display: block; width: 100%; margin-top: 8px; }
