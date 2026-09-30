@@ -375,6 +375,38 @@ async function benachrichtigeBackend(ereignis, anmeldung, turnier) {
   }
 }
 
+// Verschickt die WhatsApp-Gruppen-Einladung an EINE Mannschaft über den Mail-Server.
+// Anders als benachrichtigen() gibt es hier bewusst keinen mailto-Fallback (sonst würden sich bei
+// vielen Teams dutzende Mailfenster öffnen) - stattdessen wird genau zurückgemeldet, was passiert ist.
+// Rückgabe: "gesendet" | "nur_geloggt" (Server ohne Resend-Schlüssel) | "fehler"
+async function whatsappEinladungPerMail(anmeldung, turnier, gruppenlink) {
+  if (!E_MAIL_WEBHOOK_URL) return "fehler";
+  const abbruch = new AbortController();
+  // Großzügig, weil der kostenlose Render-Server nach Pausen erst "aufwachen" muss (bis ca. 50 Sek.)
+  const timer = setTimeout(() => abbruch.abort(), 90000);
+  try {
+    const res = await fetch(E_MAIL_WEBHOOK_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(E_MAIL_WEBHOOK_SECRET ? { "X-Webhook-Secret": E_MAIL_WEBHOOK_SECRET } : {}),
+      },
+      body: JSON.stringify({ ereignis: "whatsapp_gruppe", anmeldung, turnier: { ...turnier, whatsappGruppenlink: gruppenlink } }),
+      signal: abbruch.signal,
+    });
+    if (!res.ok) return "fehler";
+    const daten = await res.json().catch(() => ({}));
+    return daten.status === "gesendet" ? "gesendet" : daten.status === "nur_geloggt" ? "nur_geloggt" : "fehler";
+  } catch (e) {
+    console.warn("WhatsApp-Einladung konnte nicht verschickt werden:", e);
+    return "fehler";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const warten = (ms) => new Promise((r) => setTimeout(r, ms));
+
 // Zentrale Stelle: Ist der Server eingerichtet und erreichbar, verschickt er die Mail automatisch
 // im Hintergrund - der Admin muss nichts mehr tun. Nur falls der Server (noch) nicht läuft oder
 // gerade nicht erreichbar ist, springt wie bisher das Mail-Programm als Fallback ein.
@@ -3572,9 +3604,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
       try {
         const gruppenZeilen = await supabaseSelect("turnier_whatsapp_gruppen", "?select=*", session.access_token);
         const map = {};
-        gruppenZeilen.forEach((g) => {
-          map[g.turnier_id] = { link: g.link || "", geaendertVon: g.geaendert_von || "", geaendertAm: g.geaendert_am };
-        });
+        gruppenZeilen.forEach((g) => { map[g.turnier_id] = whatsappGruppeAusDb(g); });
         setWhatsappGruppen(map);
       } catch (e) {
         console.warn("WhatsApp-Gruppen konnten nicht geladen werden:", e.message);
@@ -3922,22 +3952,63 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
         });
         return true;
       }
+      const bisher = whatsappGruppen[turnierId];
+      const linkGeaendert = !bisher || bisher.link !== bereinigt;
       const zeile = await supabaseUpsert(
         "turnier_whatsapp_gruppen",
-        { turnier_id: turnierId, link: bereinigt, geaendert_von: adminProfil.name || "", geaendert_am: new Date().toISOString() },
+        {
+          turnier_id: turnierId, link: bereinigt, geaendert_von: adminProfil.name || "", geaendert_am: new Date().toISOString(),
+          ...(linkGeaendert ? { eingeladene_ids: [], versendet_am: null } : {}),
+        },
         "turnier_id",
         session.access_token
       );
-      const g = zeile[0];
-      setWhatsappGruppen((prev) => ({
-        ...prev,
-        [turnierId]: { link: g.link || "", geaendertVon: g.geaendert_von || "", geaendertAm: g.geaendert_am },
-      }));
+      setWhatsappGruppen((prev) => ({ ...prev, [turnierId]: whatsappGruppeAusDb(zeile[0]) }));
       return true;
     } catch (e) {
       alert("WhatsApp-Gruppenlink konnte nicht gespeichert werden: " + e.message);
       return false;
     }
+  };
+
+  // Verschickt die Gruppen-Einladung nacheinander an die übergebenen Mannschaften (kurzer Abstand,
+  // damit der Mail-Anbieter nichts wegen zu vieler Mails pro Sekunde ablehnt) und merkt sich,
+  // wer erfolgreich eingeladen wurde - so bekommt später niemand dieselbe Mail doppelt.
+  const whatsappEinladungenVersenden = async (turnier, empfaengerListe, beiFortschritt) => {
+    const gruppe = whatsappGruppen[turnier.id];
+    if (!gruppe?.link) return { gesendet: 0, fehlgeschlagen: [], nurGeloggt: 0 };
+    const erfolgreich = [];
+    const fehlgeschlagen = [];
+    let nurGeloggt = 0;
+    for (let i = 0; i < empfaengerListe.length; i++) {
+      const a = empfaengerListe[i];
+      beiFortschritt?.(i + 1, empfaengerListe.length);
+      const ergebnis = await whatsappEinladungPerMail(a, turnier, gruppe.link);
+      if (ergebnis === "gesendet") erfolgreich.push(a.id);
+      else if (ergebnis === "nur_geloggt") nurGeloggt++;
+      else fehlgeschlagen.push(a);
+      if (i < empfaengerListe.length - 1) await warten(700);
+    }
+    if (erfolgreich.length > 0) {
+      const alleIds = Array.from(new Set([...(gruppe.eingeladeneIds || []), ...erfolgreich]));
+      try {
+        const zeile = await supabaseUpsert(
+          "turnier_whatsapp_gruppen",
+          { turnier_id: turnier.id, link: gruppe.link, eingeladene_ids: alleIds, versendet_am: new Date().toISOString() },
+          "turnier_id",
+          session.access_token
+        );
+        setWhatsappGruppen((prev) => ({ ...prev, [turnier.id]: whatsappGruppeAusDb(zeile[0]) }));
+      } catch (e) {
+        // Die Mails sind trotzdem raus - nur die Markierung "eingeladen" konnte nicht gespeichert werden.
+        console.warn("Einladungsstatus konnte nicht gespeichert werden:", e.message);
+        setWhatsappGruppen((prev) => ({
+          ...prev,
+          [turnier.id]: { ...prev[turnier.id], eingeladeneIds: alleIds, versendetAm: new Date().toISOString() },
+        }));
+      }
+    }
+    return { gesendet: erfolgreich.length, fehlgeschlagen, nurGeloggt };
   };
 
   const erinnerungSenden = (anmeldung) => {
@@ -4555,6 +4626,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                   bestaetigteRegs={bestaetigteRegs}
                   weitereRegs={[...neueRegs, ...bearbeiteteRegs]}
                   onSpeichern={(link) => whatsappGruppeSpeichern(t.id, link)}
+                  onEinladungenSenden={(liste, fortschritt) => whatsappEinladungenVersenden(t, liste, fortschritt)}
                 />
               )}
 
@@ -4860,6 +4932,16 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
 
 const WHATSAPP_GRUPPEN_PREFIX = "https://chat.whatsapp.com/";
 
+function whatsappGruppeAusDb(g) {
+  return {
+    link: g.link || "",
+    geaendertVon: g.geaendert_von || "",
+    geaendertAm: g.geaendert_am,
+    eingeladeneIds: Array.isArray(g.eingeladene_ids) ? g.eingeladene_ids : [],
+    versendetAm: g.versendet_am || null,
+  };
+}
+
 function whatsappGruppenlinkGueltig(link) {
   return /^https:\/\/chat\.whatsapp\.com\/[A-Za-z0-9]+/.test((link || "").trim());
 }
@@ -4877,12 +4959,14 @@ async function inZwischenablage(text) {
 // WhatsApp-Gruppe je Turnier: Einladungslink hinterlegen und an die Trainer verteilen.
 // WhatsApp erlaubt Webseiten nicht, selbst Gruppen anzulegen oder Mitglieder hinzuzufügen -
 // daher: Gruppe einmal in WhatsApp erstellen, Link hier speichern, dann mit einem Klick einladen.
-function WhatsappGruppePanel({ turnier, gruppe, bestaetigteRegs, weitereRegs, onSpeichern }) {
+function WhatsappGruppePanel({ turnier, gruppe, bestaetigteRegs, weitereRegs, onSpeichern, onEinladungenSenden }) {
   const [bearbeiten, setBearbeiten] = useState(!gruppe?.link);
   const [link, setLink] = useState(gruppe?.link || "");
   const [speichert, setSpeichert] = useState(false);
   const [auchOffene, setAuchOffene] = useState(false);
   const [kopiert, setKopiert] = useState("");
+  const [versand, setVersand] = useState(null); // { aktuell, gesamt } während des Sendens
+  const [versandErgebnis, setVersandErgebnis] = useState(null);
 
   useEffect(() => {
     if (!bearbeiten) setLink(gruppe?.link || "");
@@ -4891,6 +4975,22 @@ function WhatsappGruppePanel({ turnier, gruppe, bestaetigteRegs, weitereRegs, on
   const empfaenger = auchOffene ? [...bestaetigteRegs, ...weitereRegs] : bestaetigteRegs;
   const mitTelefon = empfaenger.filter((a) => (a.telefon || "").trim());
   const emails = Array.from(new Set(empfaenger.map((a) => (a.email || "").trim()).filter(Boolean)));
+  const eingeladen = new Set(gruppe?.eingeladeneIds || []);
+  const mitEmail = empfaenger.filter((a) => (a.email || "").trim());
+  const nochNichtEingeladen = mitEmail.filter((a) => !eingeladen.has(a.id));
+
+  const automatischSenden = async (liste, erneut) => {
+    if (liste.length === 0) return;
+    const frage = erneut
+      ? `Die Einladung ERNEUT an alle ${liste.length} Mannschaften senden? Wer sie schon hat, bekommt sie dann doppelt.`
+      : `Jetzt ${liste.length} E-Mail${liste.length === 1 ? "" : "s"} mit dem Gruppenlink von ${VERANSTALTER.email} verschicken?`;
+    if (!confirm(frage)) return;
+    setVersandErgebnis(null);
+    setVersand({ aktuell: 0, gesamt: liste.length });
+    const ergebnis = await onEinladungenSenden(liste, (aktuell, gesamt) => setVersand({ aktuell, gesamt }));
+    setVersand(null);
+    setVersandErgebnis(ergebnis);
+  };
 
   const turnierZeile = `„${turnier.name}“${turnier.datum ? ` am ${formatDatum(turnier.datum)}` : ""}`;
   const einladungsText = (trainer) =>
@@ -4943,6 +5043,9 @@ function WhatsappGruppePanel({ turnier, gruppe, bestaetigteRegs, weitereRegs, on
             <li>In WhatsApp eine neue Gruppe erstellen (z. B. „KIDZCUP {turnier.name}“) – zunächst nur mit dir.</li>
             <li>Gruppeninfo öffnen → „Über Link einladen“ → „Link kopieren“.</li>
             <li>Link hier einfügen und speichern.</li>
+            {gruppe?.link && (gruppe.eingeladeneIds || []).length > 0 && (
+              <li><strong>Hinweis:</strong> Wenn du einen neuen Link speicherst, gelten alle Teams wieder als „nicht eingeladen“ – du kannst dann allen den neuen Link schicken.</li>
+            )}
           </ol>
           <input
             className="kc-input"
@@ -4974,8 +5077,8 @@ function WhatsappGruppePanel({ turnier, gruppe, bestaetigteRegs, weitereRegs, on
               </div>
             )}
             <div className="kc-admin-aktionen kc-admin-aktionen--klein">
-              <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => setBearbeiten(true)}>Link ändern</button>
-              <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={entfernen} disabled={speichert}>Link entfernen</button>
+              <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => setBearbeiten(true)} disabled={!!versand}>Link ändern</button>
+              <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={entfernen} disabled={speichert || !!versand}>Link entfernen</button>
             </div>
           </div>
 
@@ -4988,13 +5091,51 @@ function WhatsappGruppePanel({ turnier, gruppe, bestaetigteRegs, weitereRegs, on
             <p className="kc-notiz">Noch keine passenden Mannschaften zum Einladen.</p>
           ) : (
             <>
+              <div className="kc-whatsapp-versand">
+                {versand ? (
+                  <button className="kc-btn kc-btn--primary kc-btn--block" disabled>
+                    ⏳ Sende {versand.aktuell} von {versand.gesamt} … bitte Seite offen lassen
+                  </button>
+                ) : nochNichtEingeladen.length > 0 ? (
+                  <button className="kc-btn kc-btn--primary kc-btn--block" onClick={() => automatischSenden(nochNichtEingeladen, false)}>
+                    🚀 Einladung jetzt an {nochNichtEingeladen.length}{" "}
+                    {nochNichtEingeladen.length === 1
+                      ? (eingeladen.size > 0 ? "neues Team" : "Team")
+                      : (eingeladen.size > 0 ? "neue Teams" : "Teams")} senden
+                  </button>
+                ) : mitEmail.length > 0 ? (
+                  <button className="kc-btn kc-btn--sekundaer kc-btn--block" disabled>✓ Alle {mitEmail.length} Teams sind eingeladen</button>
+                ) : null}
+                {versandErgebnis && (
+                  <div className={"kc-whatsapp-ergebnis" + (versandErgebnis.fehlgeschlagen.length || versandErgebnis.nurGeloggt ? " kc-whatsapp-ergebnis--warnung" : "")}>
+                    {versandErgebnis.gesendet > 0 && <div>✓ {versandErgebnis.gesendet} E-Mail{versandErgebnis.gesendet === 1 ? "" : "s"} verschickt.</div>}
+                    {versandErgebnis.nurGeloggt > 0 && (
+                      <div>⚠️ {versandErgebnis.nurGeloggt} Mail(s) nicht verschickt: Beim Mail-Server fehlt der Resend-Schlüssel (RESEND_API_KEY auf Render).</div>
+                    )}
+                    {versandErgebnis.fehlgeschlagen.length > 0 && (
+                      <div>
+                        ⚠️ Nicht verschickt an: {versandErgebnis.fehlgeschlagen.map((a) => a.verein).join(", ")}. Einfach erneut auf den Button tippen – es werden nur die Fehlenden nachgeschickt.
+                      </div>
+                    )}
+                  </div>
+                )}
+                {!versand && eingeladen.size > 0 && (
+                  <div className="kc-notiz" style={{ marginTop: 6 }}>
+                    Zuletzt verschickt: {formatDatumZeit(gruppe.versendetAm ? new Date(gruppe.versendetAm).getTime() : null)}
+                    {" · "}
+                    <button className="kc-admin-notiz-link" onClick={() => automatischSenden(mitEmail, true)}>erneut an alle senden</button>
+                  </div>
+                )}
+              </div>
+
+              <p className="kc-notiz" style={{ marginBottom: 0 }}>Oder selbst verschicken:</p>
               <div className="kc-admin-aktionen kc-admin-aktionen--klein">
                 <a
-                  className={"kc-btn kc-btn--primary kc-btn--klein" + (emails.length === 0 ? " kc-btn--deaktiviert" : "")}
+                  className={"kc-btn kc-btn--sekundaer kc-btn--klein" + (emails.length === 0 || versand ? " kc-btn--deaktiviert" : "")}
                   href={emails.length ? mailtoLink() : undefined}
                   aria-disabled={emails.length === 0}
                 >
-                  ✉️ Alle per E-Mail einladen ({emails.length})
+                  ✉️ Über eigenes Mailprogramm ({emails.length})
                 </a>
                 <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => kopieren(einladungsText(""), "text")}>
                   {kopiert === "text" ? "✓ Kopiert" : "📋 Einladungstext kopieren"}
@@ -5004,7 +5145,7 @@ function WhatsappGruppePanel({ turnier, gruppe, bestaetigteRegs, weitereRegs, on
                 </button>
               </div>
               <p className="kc-notiz">
-                Die E-Mail geht als BCC raus – die Vereine sehen die Adressen der anderen nicht.
+                Jede Mannschaft bekommt eine eigene Mail – die Vereine sehen die Adressen der anderen nicht.
               </p>
 
               <div className="kc-whatsapp-liste">
@@ -5013,6 +5154,7 @@ function WhatsappGruppePanel({ turnier, gruppe, bestaetigteRegs, weitereRegs, on
                   <div className="kc-whatsapp-zeile" key={a.id}>
                     <span>
                       <strong>{a.verein}</strong> ({a.jugend}) · {a.trainer}
+                      {eingeladen.has(a.id) && <span className="kc-whatsapp-eingeladen">✉️ eingeladen</span>}
                     </span>
                     <a
                       className="kc-btn kc-btn--sekundaer kc-btn--klein"
@@ -5923,6 +6065,10 @@ const CSS = `
 .kc-whatsapp-liste { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
 .kc-whatsapp-zeile { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; background: #fff; border-radius: 8px; padding: 6px 10px; font-size: 13px; }
 .kc-btn--deaktiviert { opacity: 0.5; pointer-events: none; }
+.kc-whatsapp-versand { margin: 10px 0 12px; }
+.kc-whatsapp-ergebnis { margin-top: 8px; padding: 8px 10px; border-radius: 8px; background: #DDF3E3; color: #1E5B2E; font-size: 13px; display: flex; flex-direction: column; gap: 4px; }
+.kc-whatsapp-ergebnis--warnung { background: #FCF3DC; color: #7A5A00; }
+.kc-whatsapp-eingeladen { display: inline-block; margin-left: 6px; font-size: 11px; color: #1E5B2E; background: #DDF3E3; border-radius: 10px; padding: 1px 7px; }
 .kc-sponsoren-panel { background: #F4F6F7; border: 1.5px solid #D8DEE2; border-radius: 10px; padding: 12px 14px; margin-top: 10px; }
 .kc-sponsoren-liste { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0; }
 .kc-sponsor-eintrag { display: flex; flex-direction: column; align-items: center; gap: 6px; background: #fff; border: 1px solid #D8DEE2; border-radius: 8px; padding: 8px; }
