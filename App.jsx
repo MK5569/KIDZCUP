@@ -3443,6 +3443,11 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
   // Liegen bewusst in einer eigenen Tabelle (nur für Admins lesbar), damit sie nie über die
   // öffentlichen Abfragen (z. B. Code-Suche der Vereine) nach außen gelangen.
   const [notizen, setNotizen] = useState({});
+  // WhatsApp-Gruppen-Einladungslink je Turnier: { [turnierId]: { link, geaendertVon, geaendertAm } }.
+  // Eigene, nur für Admins lesbare Tabelle - die Turnier-Tabelle selbst ist öffentlich lesbar,
+  // dort würde der Link sonst für jeden Besucher sichtbar.
+  const [whatsappGruppen, setWhatsappGruppen] = useState({});
+  const [offeneWhatsapp, setOffeneWhatsapp] = useState(() => new Set());
 
   const [zeigeFormular, setZeigeFormular] = useState(false);
   const [bearbeitetesTurnier, setBearbeitetesTurnier] = useState(null);
@@ -3563,6 +3568,16 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
         setNotizen(map);
       } catch (e) {
         console.warn("Notizen konnten nicht geladen werden:", e.message);
+      }
+      try {
+        const gruppenZeilen = await supabaseSelect("turnier_whatsapp_gruppen", "?select=*", session.access_token);
+        const map = {};
+        gruppenZeilen.forEach((g) => {
+          map[g.turnier_id] = { link: g.link || "", geaendertVon: g.geaendert_von || "", geaendertAm: g.geaendert_am };
+        });
+        setWhatsappGruppen(map);
+      } catch (e) {
+        console.warn("WhatsApp-Gruppen konnten nicht geladen werden:", e.message);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3890,6 +3905,37 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
       return true;
     } catch (e) {
       alert("Notiz konnte nicht gespeichert werden: " + e.message);
+      return false;
+    }
+  };
+
+  // Speichert (oder entfernt bei leerem Feld) den WhatsApp-Gruppenlink eines Turniers.
+  const whatsappGruppeSpeichern = async (turnierId, link) => {
+    const bereinigt = (link || "").trim();
+    try {
+      if (!bereinigt) {
+        await supabaseDeleteWhere("turnier_whatsapp_gruppen", `?turnier_id=eq.${encodeURIComponent(turnierId)}`, session.access_token);
+        setWhatsappGruppen((prev) => {
+          const kopie = { ...prev };
+          delete kopie[turnierId];
+          return kopie;
+        });
+        return true;
+      }
+      const zeile = await supabaseUpsert(
+        "turnier_whatsapp_gruppen",
+        { turnier_id: turnierId, link: bereinigt, geaendert_von: adminProfil.name || "", geaendert_am: new Date().toISOString() },
+        "turnier_id",
+        session.access_token
+      );
+      const g = zeile[0];
+      setWhatsappGruppen((prev) => ({
+        ...prev,
+        [turnierId]: { link: g.link || "", geaendertVon: g.geaendert_von || "", geaendertAm: g.geaendert_am },
+      }));
+      return true;
+    } catch (e) {
+      alert("WhatsApp-Gruppenlink konnte nicht gespeichert werden: " + e.message);
       return false;
     }
   };
@@ -4473,6 +4519,16 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                 >
                   📇 Kontakte exportieren (bestätigt)
                 </button>
+                <button
+                  className="kc-btn kc-btn--sekundaer"
+                  onClick={() => setOffeneWhatsapp((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(t.id)) next.delete(t.id); else next.add(t.id);
+                    return next;
+                  })}
+                >
+                  💬 WhatsApp-Gruppe{whatsappGruppen[t.id] ? " ✓" : ""}
+                </button>
                 <button className="kc-btn kc-btn--gefahr" onClick={() => turnierLoeschen(t.id)}>Löschen</button>
               </div>
 
@@ -4490,6 +4546,16 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                     Schließen
                   </button>
                 </div>
+              )}
+
+              {offeneWhatsapp.has(t.id) && (
+                <WhatsappGruppePanel
+                  turnier={t}
+                  gruppe={whatsappGruppen[t.id]}
+                  bestaetigteRegs={bestaetigteRegs}
+                  weitereRegs={[...neueRegs, ...bearbeiteteRegs]}
+                  onSpeichern={(link) => whatsappGruppeSpeichern(t.id, link)}
+                />
               )}
 
               {offeneSponsoren.has(t.id) && (
@@ -4788,6 +4854,181 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
           );
         })()}
       </div>
+    </div>
+  );
+}
+
+const WHATSAPP_GRUPPEN_PREFIX = "https://chat.whatsapp.com/";
+
+function whatsappGruppenlinkGueltig(link) {
+  return /^https:\/\/chat\.whatsapp\.com\/[A-Za-z0-9]+/.test((link || "").trim());
+}
+
+async function inZwischenablage(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    window.prompt("Zum Kopieren markieren und kopieren:", text);
+    return false;
+  }
+}
+
+// WhatsApp-Gruppe je Turnier: Einladungslink hinterlegen und an die Trainer verteilen.
+// WhatsApp erlaubt Webseiten nicht, selbst Gruppen anzulegen oder Mitglieder hinzuzufügen -
+// daher: Gruppe einmal in WhatsApp erstellen, Link hier speichern, dann mit einem Klick einladen.
+function WhatsappGruppePanel({ turnier, gruppe, bestaetigteRegs, weitereRegs, onSpeichern }) {
+  const [bearbeiten, setBearbeiten] = useState(!gruppe?.link);
+  const [link, setLink] = useState(gruppe?.link || "");
+  const [speichert, setSpeichert] = useState(false);
+  const [auchOffene, setAuchOffene] = useState(false);
+  const [kopiert, setKopiert] = useState("");
+
+  useEffect(() => {
+    if (!bearbeiten) setLink(gruppe?.link || "");
+  }, [gruppe, bearbeiten]);
+
+  const empfaenger = auchOffene ? [...bestaetigteRegs, ...weitereRegs] : bestaetigteRegs;
+  const mitTelefon = empfaenger.filter((a) => (a.telefon || "").trim());
+  const emails = Array.from(new Set(empfaenger.map((a) => (a.email || "").trim()).filter(Boolean)));
+
+  const turnierZeile = `„${turnier.name}“${turnier.datum ? ` am ${formatDatum(turnier.datum)}` : ""}`;
+  const einladungsText = (trainer) =>
+    `Hallo${trainer ? " " + trainer : ""}, hier meldet sich KIDZCUP! Für ${turnierZeile} gibt es eine WhatsApp-Gruppe ` +
+    `für alle Trainer – dort kommen kurzfristige Infos rund um den Turniertag. Hier beitreten: ${gruppe?.link || ""}`;
+
+  const mailtoLink = () => {
+    const betreff = `WhatsApp-Gruppe zum KIDZCUP ${turnier.name}`;
+    const text =
+      `Hallo zusammen,\n\nfür ${turnierZeile} haben wir eine WhatsApp-Gruppe für alle Trainer eingerichtet. ` +
+      `Dort teilen wir kurzfristige Infos rund um den Turniertag.\n\nHier beitreten:\n${gruppe?.link || ""}\n\n` +
+      `Sportliche Grüße\n${VERANSTALTER.name}`;
+    return `mailto:${VERANSTALTER.email}?bcc=${emails.map((m) => encodeURIComponent(m).replace(/%40/g, "@")).join(",")}` +
+      `&subject=${encodeURIComponent(betreff)}&body=${encodeURIComponent(text)}`;
+  };
+
+  const kopieren = async (text, was) => {
+    await inZwischenablage(text);
+    setKopiert(was);
+    setTimeout(() => setKopiert(""), 2000);
+  };
+
+  const speichern = async () => {
+    const bereinigt = link.trim();
+    if (bereinigt && !whatsappGruppenlinkGueltig(bereinigt)) {
+      alert(`Das sieht nicht nach einem WhatsApp-Gruppenlink aus. Er beginnt mit ${WHATSAPP_GRUPPEN_PREFIX}`);
+      return;
+    }
+    setSpeichert(true);
+    const ok = await onSpeichern(bereinigt);
+    setSpeichert(false);
+    if (ok) setBearbeiten(!bereinigt);
+  };
+
+  const entfernen = async () => {
+    if (!confirm("Gruppenlink für dieses Turnier entfernen? Die Gruppe in WhatsApp selbst bleibt bestehen.")) return;
+    setSpeichert(true);
+    const ok = await onSpeichern("");
+    setSpeichert(false);
+    if (ok) { setLink(""); setBearbeiten(true); }
+  };
+
+  return (
+    <div className="kc-whatsapp-panel">
+      <h3 className="kc-h3" style={{ marginTop: 0 }}>💬 WhatsApp-Gruppe für dieses Turnier</h3>
+
+      {bearbeiten ? (
+        <>
+          <ol className="kc-whatsapp-anleitung">
+            <li>In WhatsApp eine neue Gruppe erstellen (z. B. „KIDZCUP {turnier.name}“) – zunächst nur mit dir.</li>
+            <li>Gruppeninfo öffnen → „Über Link einladen“ → „Link kopieren“.</li>
+            <li>Link hier einfügen und speichern.</li>
+          </ol>
+          <input
+            className="kc-input"
+            type="url"
+            inputMode="url"
+            value={link}
+            onChange={(e) => setLink(e.target.value)}
+            placeholder={WHATSAPP_GRUPPEN_PREFIX + "…"}
+          />
+          <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+            <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={speichern} disabled={speichert || !link.trim()}>
+              {speichert ? "Speichert …" : "💾 Gruppenlink speichern"}
+            </button>
+            {gruppe?.link && (
+              <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => { setLink(gruppe.link); setBearbeiten(false); }} disabled={speichert}>
+                Abbrechen
+              </button>
+            )}
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="kc-whatsapp-link">
+            <a href={gruppe.link} target="_blank" rel="noopener">{gruppe.link}</a>
+            {(gruppe.geaendertVon || gruppe.geaendertAm) && (
+              <div className="kc-notiz" style={{ marginTop: 4 }}>
+                Hinterlegt{gruppe.geaendertVon ? ` von ${gruppe.geaendertVon}` : ""}
+                {gruppe.geaendertAm ? ` · ${formatDatumZeit(new Date(gruppe.geaendertAm).getTime())}` : ""}
+              </div>
+            )}
+            <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+              <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => setBearbeiten(true)}>Link ändern</button>
+              <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={entfernen} disabled={speichert}>Link entfernen</button>
+            </div>
+          </div>
+
+          <label className="kc-whatsapp-auswahl">
+            <input type="checkbox" checked={auchOffene} onChange={(e) => setAuchOffene(e.target.checked)} />
+            Auch noch nicht bestätigte Teams einladen (ohne Warteliste und Abgelehnte)
+          </label>
+
+          {empfaenger.length === 0 ? (
+            <p className="kc-notiz">Noch keine passenden Mannschaften zum Einladen.</p>
+          ) : (
+            <>
+              <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+                <a
+                  className={"kc-btn kc-btn--primary kc-btn--klein" + (emails.length === 0 ? " kc-btn--deaktiviert" : "")}
+                  href={emails.length ? mailtoLink() : undefined}
+                  aria-disabled={emails.length === 0}
+                >
+                  ✉️ Alle per E-Mail einladen ({emails.length})
+                </a>
+                <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => kopieren(einladungsText(""), "text")}>
+                  {kopiert === "text" ? "✓ Kopiert" : "📋 Einladungstext kopieren"}
+                </button>
+                <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => kopieren(emails.join(", "), "mails")} disabled={emails.length === 0}>
+                  {kopiert === "mails" ? "✓ Kopiert" : "📋 E-Mail-Adressen kopieren"}
+                </button>
+              </div>
+              <p className="kc-notiz">
+                Die E-Mail geht als BCC raus – die Vereine sehen die Adressen der anderen nicht.
+              </p>
+
+              <div className="kc-whatsapp-liste">
+                <strong style={{ fontSize: 13 }}>Einzeln per WhatsApp einladen ({mitTelefon.length})</strong>
+                {mitTelefon.map((a) => (
+                  <div className="kc-whatsapp-zeile" key={a.id}>
+                    <span>
+                      <strong>{a.verein}</strong> ({a.jugend}) · {a.trainer}
+                    </span>
+                    <a
+                      className="kc-btn kc-btn--sekundaer kc-btn--klein"
+                      href={whatsappLink(a.telefon, einladungsText(a.trainer))}
+                      target="_blank"
+                      rel="noopener"
+                    >
+                      📱 Einladen
+                    </a>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -5675,6 +5916,13 @@ const CSS = `
 .kc-bestaetigt-block { background: #F0F8F3; border: 1.5px solid var(--kc-green); border-radius: 10px; padding: 10px 12px 4px; margin-bottom: 4px; display: flex; flex-direction: column; gap: 12px; }
 .kc-vcf-hinweis { background: #FCF3DC; border: 1.5px solid #E0A100; border-radius: 10px; padding: 12px 14px; margin-top: 10px; }
 .kc-vcf-hinweis p { margin: 0 0 10px; font-size: 13px; color: #7A5A00; line-height: 1.5; }
+.kc-whatsapp-panel { background: #EEF8F0; border: 1.5px solid #B9DFC2; border-radius: 10px; padding: 12px 14px; margin-top: 10px; }
+.kc-whatsapp-anleitung { margin: 0 0 10px; padding-left: 20px; font-size: 13px; line-height: 1.5; }
+.kc-whatsapp-link { background: #fff; border-radius: 8px; padding: 8px 10px; font-size: 13px; word-break: break-all; }
+.kc-whatsapp-auswahl { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; margin: 12px 0 4px; cursor: pointer; }
+.kc-whatsapp-liste { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.kc-whatsapp-zeile { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; background: #fff; border-radius: 8px; padding: 6px 10px; font-size: 13px; }
+.kc-btn--deaktiviert { opacity: 0.5; pointer-events: none; }
 .kc-sponsoren-panel { background: #F4F6F7; border: 1.5px solid #D8DEE2; border-radius: 10px; padding: 12px 14px; margin-top: 10px; }
 .kc-sponsoren-liste { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0; }
 .kc-sponsor-eintrag { display: flex; flex-direction: column; align-items: center; gap: 6px; background: #fff; border: 1px solid #D8DEE2; border-radius: 8px; padding: 8px; }
