@@ -1377,6 +1377,17 @@ async function supabaseInsert(table, daten, accessToken) {
   return res.json();
 }
 
+// Legt eine Zeile an oder überschreibt sie, falls der Schlüssel (onConflict) schon existiert.
+async function supabaseUpsert(table, daten, onConflict, accessToken) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}?on_conflict=${encodeURIComponent(onConflict)}`, {
+    method: "POST",
+    headers: { ...supabaseHeaders(accessToken), Prefer: "resolution=merge-duplicates,return=representation" },
+    body: JSON.stringify(daten),
+  });
+  if (!res.ok) throw new Error(await supabaseFehlerText(res));
+  return res.json();
+}
+
 async function supabaseUpdate(table, id, daten, accessToken) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${encodeURIComponent(id)}`, {
     method: "PATCH",
@@ -3428,6 +3439,10 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
   // damit man später noch nachvollziehen kann, wann/für welches Turnier gelöscht wurde, ohne den Zweck
   // der Löschung (Entfernung personenbezogener Daten) zu unterlaufen.
   const [loeschprotokoll, setLoeschprotokoll] = useState([]);
+  // Interne Admin-Notizen je Mannschaft/Anmeldung: { [anmeldungId]: { text, geaendertVon, geaendertAm } }.
+  // Liegen bewusst in einer eigenen Tabelle (nur für Admins lesbar), damit sie nie über die
+  // öffentlichen Abfragen (z. B. Code-Suche der Vereine) nach außen gelangen.
+  const [notizen, setNotizen] = useState({});
 
   const [zeigeFormular, setZeigeFormular] = useState(false);
   const [bearbeitetesTurnier, setBearbeitetesTurnier] = useState(null);
@@ -3538,6 +3553,16 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
         setLoeschprotokoll(protokollZeilen);
       } catch (e) {
         console.warn("Löschprotokoll konnte nicht geladen werden:", e.message);
+      }
+      try {
+        const notizZeilen = await supabaseSelect("anmeldung_notizen", "?select=*", session.access_token);
+        const map = {};
+        notizZeilen.forEach((n) => {
+          map[n.anmeldung_id] = { text: n.notiz || "", geaendertVon: n.geaendert_von || "", geaendertAm: n.geaendert_am };
+        });
+        setNotizen(map);
+      } catch (e) {
+        console.warn("Notizen konnten nicht geladen werden:", e.message);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3835,6 +3860,37 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
       }
     } catch (e) {
       alert("Mannschaft konnte nicht aus der Warteliste aufgenommen werden: " + e.message);
+    }
+  };
+
+  // Speichert (oder löscht bei leerem Text) die interne Notiz zu einer Mannschaft.
+  const notizSpeichern = async (anmeldungId, text) => {
+    const bereinigt = (text || "").trim();
+    try {
+      if (!bereinigt) {
+        await supabaseDeleteWhere("anmeldung_notizen", `?anmeldung_id=eq.${encodeURIComponent(anmeldungId)}`, session.access_token);
+        setNotizen((prev) => {
+          const kopie = { ...prev };
+          delete kopie[anmeldungId];
+          return kopie;
+        });
+        return true;
+      }
+      const zeile = await supabaseUpsert(
+        "anmeldung_notizen",
+        { anmeldung_id: anmeldungId, notiz: bereinigt, geaendert_von: adminProfil.name || "", geaendert_am: new Date().toISOString() },
+        "anmeldung_id",
+        session.access_token
+      );
+      const n = zeile[0];
+      setNotizen((prev) => ({
+        ...prev,
+        [anmeldungId]: { text: n.notiz || "", geaendertVon: n.geaendert_von || "", geaendertAm: n.geaendert_am },
+      }));
+      return true;
+    } catch (e) {
+      alert("Notiz konnte nicht gespeichert werden: " + e.message);
+      return false;
     }
   };
 
@@ -4496,6 +4552,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                           {a.bearbeitetVon && <div className="kc-notiz">Bearbeitet von: {a.bearbeitetVon}</div>}
                           {a.gebuehrenfrei && <div className="kc-notiz" style={{ color: "var(--kc-green)", fontWeight: 600 }}>🆓 Gebührenfrei</div>}
                         </div>
+                        <AnmeldungNotiz notiz={notizen[a.id]} onSpeichern={(text) => notizSpeichern(a.id, text)} />
                         <span className="kc-status-badge kc-status-badge--klein" style={{ background: STATUS_FARBE[st] }}>
                           {STATUS_LABEL[st]}
                         </span>
@@ -4571,6 +4628,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                             )}
                             {a.gebuehrenfrei && <div className="kc-notiz" style={{ color: "var(--kc-green)", fontWeight: 600 }}>🆓 Gebührenfrei</div>}
                           </div>
+                          <AnmeldungNotiz notiz={notizen[a.id]} onSpeichern={(text) => notizSpeichern(a.id, text)} />
                           <span className="kc-status-badge kc-status-badge--klein" style={{ background: STATUS_FARBE.bestaetigt }}>
                             {STATUS_LABEL.bestaetigt}
                           </span>
@@ -4616,6 +4674,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                           {a.bearbeitetVon && <div className="kc-notiz">Bearbeitet von: {a.bearbeitetVon}</div>}
                           {a.gebuehrenfrei && <div className="kc-notiz" style={{ color: "var(--kc-green)", fontWeight: 600 }}>🆓 Gebührenfrei</div>}
                         </div>
+                        <AnmeldungNotiz notiz={notizen[a.id]} onSpeichern={(text) => notizSpeichern(a.id, text)} />
                         <span className="kc-status-badge kc-status-badge--klein" style={{ background: STATUS_FARBE[st] }}>
                           {STATUS_LABEL[st]}
                         </span>
@@ -4676,6 +4735,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                             <div className="kc-notiz">{a.email} · {a.telefon}</div>
                             <div className="kc-notiz">Angemeldet: {formatDatumZeit(a.angemeldetAm)}</div>
                           </div>
+                          <AnmeldungNotiz notiz={notizen[a.id]} onSpeichern={(text) => notizSpeichern(a.id, text)} />
                           <span className="kc-status-badge kc-status-badge--klein" style={{ background: STATUS_FARBE.warteliste }}>
                             {STATUS_LABEL.warteliste}
                           </span>
@@ -4706,6 +4766,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                             {a.bearbeitetVon && <div className="kc-notiz">Abgelehnt von: {a.bearbeitetVon}</div>}
                             {a.ablehnungsgrund && <div className="kc-notiz"><strong>Grund:</strong> {a.ablehnungsgrund}</div>}
                           </div>
+                          <AnmeldungNotiz notiz={notizen[a.id]} onSpeichern={(text) => notizSpeichern(a.id, text)} />
                           <span className="kc-status-badge kc-status-badge--klein" style={{ background: STATUS_FARBE.abgelehnt }}>
                             {STATUS_LABEL.abgelehnt}
                           </span>
@@ -4728,6 +4789,76 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
         })()}
       </div>
     </div>
+  );
+}
+
+// Interne Notiz zu einer Mannschaft - nur im Admin-Bereich sichtbar, nie für Vereine.
+function AnmeldungNotiz({ notiz, onSpeichern }) {
+  const [bearbeiten, setBearbeiten] = useState(false);
+  const [text, setText] = useState(notiz?.text || "");
+  const [speichert, setSpeichert] = useState(false);
+
+  useEffect(() => {
+    if (!bearbeiten) setText(notiz?.text || "");
+  }, [notiz, bearbeiten]);
+
+  const speichern = async () => {
+    setSpeichert(true);
+    const ok = await onSpeichern(text);
+    setSpeichert(false);
+    if (ok) setBearbeiten(false);
+  };
+
+  if (bearbeiten) {
+    return (
+      <div className="kc-admin-notiz kc-admin-notiz--bearbeiten">
+        <textarea
+          className="kc-input kc-textarea"
+          rows={3}
+          value={text}
+          autoFocus
+          onChange={(e) => setText(e.target.value)}
+          placeholder="Interne Notiz, z. B. „kommt 30 Min. später“, „2 Kinder ohne Foto-Freigabe“, „Rechnung an Förderverein“ …"
+        />
+        <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+          <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={speichern} disabled={speichert}>
+            {speichert ? "Speichert …" : "💾 Notiz speichern"}
+          </button>
+          <button
+            className="kc-btn kc-btn--sekundaer kc-btn--klein"
+            onClick={() => { setText(notiz?.text || ""); setBearbeiten(false); }}
+            disabled={speichert}
+          >
+            Abbrechen
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (notiz?.text) {
+    return (
+      <div className="kc-admin-notiz">
+        <div className="kc-admin-notiz-kopf">
+          <strong>📝 Notiz</strong>
+          <button className="kc-admin-notiz-link" onClick={() => setBearbeiten(true)}>Bearbeiten</button>
+        </div>
+        <div className="kc-admin-notiz-text">{notiz.text}</div>
+        {(notiz.geaendertVon || notiz.geaendertAm) && (
+          <div className="kc-admin-notiz-meta">
+            {notiz.geaendertVon && `von ${notiz.geaendertVon}`}
+            {notiz.geaendertVon && notiz.geaendertAm && " · "}
+            {notiz.geaendertAm && formatDatumZeit(new Date(notiz.geaendertAm).getTime())}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => setBearbeiten(true)}>
+      📝 Notiz hinzufügen
+    </button>
   );
 }
 
@@ -5618,6 +5749,13 @@ const CSS = `
 .kc-anmeldungs-tabelle { margin-top: 14px; border-top: 1px solid #E5EAE3; padding-top: 12px; display: flex; flex-direction: column; gap: 12px; }
 .kc-einnahmen-gesamt { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; padding: 12px 14px; background: var(--kc-pitch); color: white; border-radius: 8px; font-size: 15px; }
 .kc-einnahmen-gesamt strong { font-size: 19px; }
+.kc-admin-notiz { align-self: stretch; background: #FFF8E1; border: 1px solid #F2DFA0; border-left: 4px solid #E8B923; border-radius: 6px; padding: 8px 10px; font-size: 13px; }
+.kc-admin-notiz--bearbeiten { background: #FFFDF4; }
+.kc-admin-notiz--bearbeiten .kc-textarea { width: 100%; box-sizing: border-box; }
+.kc-admin-notiz-kopf { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 4px; }
+.kc-admin-notiz-text { white-space: pre-wrap; word-break: break-word; color: #3D3420; }
+.kc-admin-notiz-meta { font-size: 11px; color: var(--kc-muted); margin-top: 4px; }
+.kc-admin-notiz-link { background: none; border: none; padding: 0; color: var(--kc-green); font-weight: 600; font-size: 12px; cursor: pointer; text-decoration: underline; }
 .kc-anmeldungs-zeile { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; padding: 10px 12px; background: #F8FAF7; border-radius: 8px; font-size: 13.5px; }
 
 @media (max-width: 480px) {
