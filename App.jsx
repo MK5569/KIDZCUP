@@ -4909,6 +4909,17 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                             {STATUS_LABEL.abgelehnt}
                           </span>
                           <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+                            <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAnnehmen(a.id)} title="Setzt die Anmeldung wieder auf 'Ausstehend' mit neuer Zahlungsfrist">
+                              ✅ Wieder annehmen
+                            </button>
+                            <a
+                              className="kc-btn kc-btn--sekundaer kc-btn--klein"
+                              href={whatsappLink(a.telefon, `Hallo ${a.trainer}, hier meldet sich KIDZCUP bezüglich eurer Anmeldung für "${t.name}".`)}
+                              target="_blank"
+                              rel="noopener"
+                            >
+                              📱 WhatsApp kontaktieren
+                            </a>
                             <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungManuellLoeschen(a)} title="Löschung auf Anfrage, z. B. bei Auskunftsersuchen">
                               🗑 Daten löschen
                             </button>
