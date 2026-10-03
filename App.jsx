@@ -5164,7 +5164,7 @@ function WhatsappGruppePanel({ turnier, gruppe, bestaetigteRegs, weitereRegs, on
                 {mitTelefon.map((a) => (
                   <div className="kc-whatsapp-zeile" key={a.id}>
                     <span>
-                      <strong>{a.verein}</strong> ({a.jugend}) · {a.trainer}
+                      <strong>{a.verein}</strong> ({a.jugend}) · {a.trainer} · {a.telefon}
                       {eingeladen.has(a.id) && <span className="kc-whatsapp-eingeladen">✉️ eingeladen</span>}
                     </span>
                     <a
