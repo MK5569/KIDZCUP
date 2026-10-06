@@ -824,6 +824,155 @@ function spielplanMitZeit(plan, spielId, uhrzeit, feld) {
   return neu;
 }
 
+// ---------- Spielnummern & Gruppen-Verschieben ----------
+
+// Gruppenspiele in zeitlicher Reihenfolge: erst nach Uhrzeit, dann nach Feld, dann nach der
+// ursprünglichen Position. Spiele ohne Uhrzeit landen am Ende.
+function gruppenSpieleChronologisch(plan) {
+  return (plan.spiele || [])
+    .map((s, i) => ({ s, i }))
+    .sort((a, b) =>
+      (a.s.uhrzeit || "99:99").localeCompare(b.s.uhrzeit || "99:99") ||
+      (a.s.feld || 999) - (b.s.feld || 999) ||
+      a.i - b.i
+    )
+    .map(({ s }) => s);
+}
+
+// Vergibt fortlaufende Spielnummern (Spiel 1, 2, 3 ...). Gruppenspiele zuerst (chronologisch),
+// danach K.o.-Runden bzw. Auf-/Abstiegsrunden in Rundenreihenfolge, zuletzt das Spiel um Platz 3.
+// Freilose zählen nicht mit. Die Nummern werden nur berechnet und nicht in der Datenbank gespeichert.
+function spielNummernBerechnen(plan) {
+  const nummern = {};
+  let zaehler = 0;
+  const vergeben = (s) => {
+    if (s && s.id && !s.freilos) nummern[s.id] = ++zaehler;
+  };
+  gruppenSpieleChronologisch(plan).forEach(vergeben);
+  if (plan.runden) {
+    plan.runden.forEach((runde) => {
+      const liste = plan.modus === "aufabstieg" ? [...runde].sort((a, b) => a.tisch - b.tisch) : runde;
+      liste.forEach(vergeben);
+    });
+  }
+  if (plan.platz3Spiel) vergeben(plan.platz3Spiel);
+  return { nummern, gesamt: zaehler };
+}
+
+function minutenAusUhrzeit(uhrzeit) {
+  const [h, m] = uhrzeit.split(":").map(Number);
+  return h * 60 + m;
+}
+
+// Rekonstruiert aus den bereits vergebenen Zeiten die Zeitoptionen des Plans (Spieldauer, Felder) und
+// liefert als Startzeit den Slot direkt nach dem letzten Gruppenspiel. So lassen sich neu entstehende
+// Spiele (nach dem Verschieben einer Mannschaft) ohne zusätzliche Datenbankfelder sinnvoll einplanen.
+function zeitOptionenAusPlan(plan) {
+  const mitZeit = (plan.spiele || []).filter((s) => s.uhrzeit);
+  if (mitZeit.length === 0) return null;
+  const zeiten = [...new Set(mitZeit.map((s) => s.uhrzeit))].sort();
+  let spieldauerMin = 20;
+  if (zeiten.length > 1) {
+    let kleinste = Infinity;
+    for (let i = 1; i < zeiten.length; i++) {
+      const diff = minutenAusUhrzeit(zeiten[i]) - minutenAusUhrzeit(zeiten[i - 1]);
+      if (diff > 0 && diff < kleinste) kleinste = diff;
+    }
+    if (kleinste !== Infinity) spieldauerMin = kleinste;
+  }
+  const anzahlFelder = Math.max(1, ...mitZeit.map((s) => Number(s.feld) || 1));
+  return { startzeit: addMinuten(zeiten[zeiten.length - 1], spieldauerMin), spieldauerMin, anzahlFelder };
+}
+
+// Verschiebt eine Mannschaft in eine andere Gruppe oder tauscht sie mit einer Mannschaft der Zielgruppe.
+// Reine Funktion: verändert den übergebenen Plan nicht, sondern liefert einen neuen zurück.
+//  - Tausch (tauschTeamId gesetzt): Beide Mannschaften übernehmen die Spielplätze (Uhrzeit/Feld) der
+//    jeweils anderen. Bereits eingetragene Ergebnisse dieser Spiele werden zurückgesetzt.
+//  - Verschieben (ohne tauschTeamId): Die Spiele der Mannschaft in der alten Gruppe entfallen, in der
+//    Zielgruppe entstehen neue Spiele (am Ende des Gruppenplans eingeplant). Alle übrigen Spiele und
+//    Ergebnisse bleiben unverändert erhalten.
+// Rückgabe: { plan, betroffeneMitErgebnis, geaendert, fehler }
+function gruppenMannschaftVerschieben(plan, teamId, zielGruppeId, tauschTeamId) {
+  const neu = JSON.parse(JSON.stringify(plan));
+  const unveraendert = (fehler) => ({ plan: neu, betroffeneMitErgebnis: 0, geaendert: false, fehler: fehler || null });
+
+  if (!neu.gruppen || !neu.spiele) return unveraendert("Dieser Spielplan hat keine Gruppen.");
+  if (neu.runden) return unveraendert("Die K.o.-Endrunde ist bereits gestartet - die Gruppen lassen sich nicht mehr ändern.");
+
+  const quelle = neu.gruppen.find((g) => g.teamIds.includes(teamId));
+  const ziel = neu.gruppen.find((g) => g.id === zielGruppeId);
+  if (!quelle || !ziel) return unveraendert("Gruppe oder Mannschaft wurde nicht gefunden.");
+  if (quelle.id === ziel.id) return unveraendert(null);
+
+  const hatErgebnis = (s) => s.heimTore !== null && s.gastTore !== null;
+  const beteiligt = (s, id) => s.heimId === id || s.gastId === id;
+  let betroffen = 0;
+
+  // --- Tausch zweier Mannschaften ---
+  if (tauschTeamId) {
+    if (!ziel.teamIds.includes(tauschTeamId)) return unveraendert("Die Tausch-Mannschaft gehört nicht zur Zielgruppe.");
+    quelle.teamIds = quelle.teamIds.map((id) => (id === teamId ? tauschTeamId : id));
+    ziel.teamIds = ziel.teamIds.map((id) => (id === tauschTeamId ? teamId : id));
+    neu.spiele.forEach((s) => {
+      let alt = null;
+      let ersatz = null;
+      if (s.gruppeId === quelle.id && beteiligt(s, teamId)) { alt = teamId; ersatz = tauschTeamId; }
+      else if (s.gruppeId === ziel.id && beteiligt(s, tauschTeamId)) { alt = tauschTeamId; ersatz = teamId; }
+      if (!alt) return;
+      if (hatErgebnis(s)) betroffen++;
+      if (s.heimId === alt) s.heimId = ersatz; else s.gastId = ersatz;
+      s.heimTore = null;
+      s.gastTore = null;
+    });
+    return { plan: neu, betroffeneMitErgebnis: betroffen, geaendert: true, fehler: null };
+  }
+
+  // --- Verschieben in die Zielgruppe (Gruppengrößen ändern sich) ---
+  if (quelle.teamIds.length <= 2) {
+    return unveraendert("Eine Gruppe braucht mindestens 2 Mannschaften - bitte stattdessen mit einer Mannschaft tauschen.");
+  }
+
+  const eigene = neu.spiele.filter((s) => s.gruppeId === quelle.id && beteiligt(s, teamId));
+  betroffen = eigene.filter(hatErgebnis).length;
+
+  // War die Zielgruppe ein vollständiges Jeder-gegen-Jeden (ggf. mit Rückrunde)?
+  const nZiel = ziel.teamIds.length;
+  const faktor = neu.mitRueckrunde ? 2 : 1;
+  const zielSpiele = neu.spiele.filter((s) => s.gruppeId === ziel.id);
+  const zielIstVollstaendig = zielSpiele.length >= ((nZiel * (nZiel - 1)) / 2) * faktor;
+
+  const andere = [...ziel.teamIds];
+  const neueSpiele = [];
+  if (zielIstVollstaendig) {
+    andere.forEach((gegner) => {
+      neueSpiele.push(neuesSpiel(teamId, gegner, { gruppeId: ziel.id, rueckspiel: false }));
+      if (neu.mitRueckrunde) neueSpiele.push(neuesSpiel(gegner, teamId, { gruppeId: ziel.id, rueckspiel: true }));
+    });
+  } else {
+    // Zufalls-Teilplan: gleich viele Spiele wie bisher, gegen die Gegner mit den wenigsten Spielen
+    const gewuenscht = Math.min(Math.max(1, eigene.length), andere.length);
+    const grad = {};
+    andere.forEach((id) => { grad[id] = zielSpiele.filter((s) => beteiligt(s, id)).length; });
+    mischen(andere)
+      .sort((a, b) => grad[a] - grad[b])
+      .slice(0, gewuenscht)
+      .forEach((gegner) => {
+        neueSpiele.push(neuesSpiel(teamId, gegner, { gruppeId: ziel.id, rueckspiel: false }));
+      });
+  }
+
+  // Zeiten und Felder für die neuen Spiele: direkt nach dem bisher letzten Gruppenspiel
+  const zeitOptionen = zeitOptionenAusPlan(plan);
+  if (zeitOptionen) zeitenZuweisenAnListe(neueSpiele, zeitOptionen);
+
+  neu.spiele = neu.spiele.filter((s) => !(s.gruppeId === quelle.id && beteiligt(s, teamId)));
+  neu.spiele.push(...neueSpiele);
+  quelle.teamIds = quelle.teamIds.filter((id) => id !== teamId);
+  ziel.teamIds = [...ziel.teamIds, teamId];
+
+  return { plan: neu, betroffeneMitErgebnis: betroffen, geaendert: true, fehler: null };
+}
+
 // Erstellt clientseitig ein einfaches, druckbares PDF des aktuellen Spielplans (ohne Server).
 // Zeichnet eine Tabellenzeile mit echten Zellrahmen (Raster-Optik). spaltenBreiten und werte müssen
 // gleich lang sein. Mit kopf=true wird die Zeile fett und farbig hinterlegt (für Kopfzeilen).
@@ -952,45 +1101,65 @@ async function spielplanAlsPdfHerunterladen(plan, teams, turnier, sponsoren = []
   doc.setTextColor(0, 0, 0);
   y += 8;
 
-  // Spaltenbreiten für die Gruppentabelle (Verein, Sp, S, U, N, Tore, Pkt.) - Summe 182mm
-  const tabSpalten = [66, 16, 16, 16, 16, 26, 26];
-  // Spaltenbreiten für die Spiel-Zeilen (Zeit/Feld, Heim, Ergebnis, Gast) - Summe 182mm
-  const spielSpalten = [24, 68, 22, 68];
+  const { nummern: spielNr } = spielNummernBerechnen(plan);
+  // Spalten mit Spielnummer: Nr., Zeit/Feld, Heim, Ergebnis, Gast - Summe 182mm
+  const nrSpalten = [14, 26, 58, 22, 62];
 
   if (plan.gruppen) {
-    plan.gruppen.forEach((g) => {
-      neueZeilePruefen(12);
+    // Gruppentabellen nebeneinander (bis zu 3 pro Zeile), danach der Gesamtspielplan chronologisch.
+    const proZeile = Math.min(3, plan.gruppen.length);
+    const luecke = 4;
+    const kasten = (182 - luecke * (proZeile - 1)) / proZeile;
+    const kompaktSpalten = [kasten - 34, 8, 14, 12];
+    for (let i = 0; i < plan.gruppen.length; i += proZeile) {
+      const reihe = plan.gruppen.slice(i, i + proZeile);
+      const maxTeams = Math.max(...reihe.map((g) => g.teamIds.length));
+      neueZeilePruefen(12 + (maxTeams + 1) * 6.5);
+      reihe.forEach((g, k) => {
+        const x = 14 + k * (kasten + luecke);
+        let gy = y;
+        doc.setFontSize(12);
+        doc.setFont(undefined, "bold");
+        doc.text(g.name, x, gy);
+        doc.setFont(undefined, "normal");
+        gy += 5;
+        doc.setFontSize(8);
+        gy = pdfTabellenzeile(doc, x, gy, kompaktSpalten, ["Verein", "Sp", "Tore", "Pkt."], true);
+        berechneTabelle(g, plan.spiele).forEach((r) => {
+          gy = pdfTabellenzeile(doc, x, gy, kompaktSpalten, [
+            String(teamName(r.teamId)).slice(0, Math.max(10, Math.floor(kompaktSpalten[0] / 1.9))), r.spiele, `${r.tore}:${r.gegentore}`, r.punkte,
+          ]);
+        });
+      });
+      y += 5 + (maxTeams + 1) * 6.5 + 8;
+    }
+
+    const alleGruppenspiele = gruppenSpieleChronologisch(plan);
+    if (alleGruppenspiele.length > 0) {
+      neueZeilePruefen(20);
       doc.setFontSize(13);
       doc.setFont(undefined, "bold");
-      doc.text(g.name, 14, y);
+      doc.text(plan.modus === "gruppen_ko" ? "Spielplan Gruppenphase" : "Spielplan", 14, y);
       doc.setFont(undefined, "normal");
+      doc.setFontSize(9);
+      doc.setTextColor(90, 90, 90);
+      doc.text(`${alleGruppenspiele.length} Spiele`, seitenBreite - 14, y, { align: "right" });
+      doc.setTextColor(0, 0, 0);
       y += 6;
-
-      const tabelle = berechneTabelle(g, plan.spiele);
       doc.setFontSize(8.5);
-      y = pdfTabellenzeile(doc, 14, y, tabSpalten, ["Verein", "Sp", "S", "U", "N", "Tore", "Pkt."], true);
-      tabelle.forEach((r) => {
+      const gruppenNameVon = (id) => (plan.gruppen.find((g) => g.id === id) || {}).name || "";
+      const kopfSpalten = [12, 26, 20, 52, 20, 52];
+      y = pdfTabellenzeile(doc, 14, y, kopfSpalten, ["Nr.", "Zeit/Feld", "Gruppe", "Heim", "Erg.", "Gast"], true);
+      alleGruppenspiele.forEach((s) => {
         neueZeilePruefen();
-        y = pdfTabellenzeile(doc, 14, y, tabSpalten, [
-          String(teamName(r.teamId)).slice(0, 38), r.spiele, r.siege, r.unentschieden, r.niederlagen, `${r.tore}:${r.gegentore}`, r.punkte,
+        const ergebnis = s.heimTore !== null && s.gastTore !== null ? `${s.heimTore}:${s.gastTore}` : "– : –";
+        const rueck = s.rueckspiel ? " (R)" : "";
+        y = pdfTabellenzeile(doc, 14, y, kopfSpalten, [
+          String(spielNr[s.id] || ""), zeitFeldText(s), gruppenNameVon(s.gruppeId), teamName(s.heimId) + rueck, ergebnis, teamName(s.gastId),
         ]);
       });
-      y += 5;
-
-      const spieleDerGruppe = plan.spiele
-        .filter((s) => s.gruppeId === g.id)
-        .sort((a, b) => (a.uhrzeit || "99:99").localeCompare(b.uhrzeit || "99:99") || (a.feld || 0) - (b.feld || 0));
-      if (spieleDerGruppe.length > 0) {
-        y = pdfTabellenzeile(doc, 14, y, spielSpalten, ["Zeit/Feld", "Heim", "Erg.", "Gast"], true);
-        spieleDerGruppe.forEach((s) => {
-          neueZeilePruefen();
-          const ergebnis = s.heimTore !== null && s.gastTore !== null ? `${s.heimTore}:${s.gastTore}` : "– : –";
-          const rueck = s.rueckspiel ? " (R)" : "";
-          y = pdfTabellenzeile(doc, 14, y, spielSpalten, [zeitFeldText(s), teamName(s.heimId) + rueck, ergebnis, teamName(s.gastId)]);
-        });
-      }
       y += 8;
-    });
+    }
   }
   if (plan.runden) {
     if (plan.gruppen) {
@@ -1013,16 +1182,16 @@ async function spielplanAlsPdfHerunterladen(plan, teams, turnier, sponsoren = []
       doc.setFont(undefined, "normal");
       y += 6;
       doc.setFontSize(8.5);
-      y = pdfTabellenzeile(doc, 14, y, spielSpalten, [istAufAbstieg ? "Tisch" : "Zeit/Feld", "Heim", "Erg.", "Gast"], true);
+      y = pdfTabellenzeile(doc, 14, y, nrSpalten, ["Nr.", istAufAbstieg ? "Tisch" : "Zeit/Feld", "Heim", "Erg.", "Gast"], true);
       const rundeSortiert = istAufAbstieg ? [...runde].sort((a, b) => a.tisch - b.tisch) : runde;
       rundeSortiert.forEach((s) => {
         neueZeilePruefen();
         if (s.freilos) {
-          y = pdfTabellenzeile(doc, 14, y, spielSpalten, ["", teamName(s.heimId), "Freilos", ""]);
+          y = pdfTabellenzeile(doc, 14, y, nrSpalten, ["", "", teamName(s.heimId), "Freilos", ""]);
         } else {
           const ergebnis = s.heimTore !== null && s.gastTore !== null ? `${s.heimTore}:${s.gastTore}` : "– : –";
           const ersteSpalte = istAufAbstieg ? `Tisch ${s.tisch}` : zeitFeldText(s);
-          y = pdfTabellenzeile(doc, 14, y, spielSpalten, [ersteSpalte, teamName(s.heimId), ergebnis, teamName(s.gastId)]);
+          y = pdfTabellenzeile(doc, 14, y, nrSpalten, [String(spielNr[s.id] || ""), ersteSpalte, teamName(s.heimId), ergebnis, teamName(s.gastId)]);
         }
       });
       y += 8;
@@ -1052,9 +1221,9 @@ async function spielplanAlsPdfHerunterladen(plan, teams, turnier, sponsoren = []
       y += 6;
       doc.setFontSize(8.5);
       const s = plan.platz3Spiel;
-      y = pdfTabellenzeile(doc, 14, y, spielSpalten, ["Zeit/Feld", "Heim", "Erg.", "Gast"], true);
+      y = pdfTabellenzeile(doc, 14, y, nrSpalten, ["Nr.", "Zeit/Feld", "Heim", "Erg.", "Gast"], true);
       const ergebnis = s.heimTore !== null && s.gastTore !== null ? `${s.heimTore}:${s.gastTore}` : "– : –";
-      y = pdfTabellenzeile(doc, 14, y, spielSpalten, [zeitFeldText(s), teamName(s.heimId), ergebnis, teamName(s.gastId)]);
+      y = pdfTabellenzeile(doc, 14, y, nrSpalten, [String(spielNr[s.id] || ""), zeitFeldText(s), teamName(s.heimId), ergebnis, teamName(s.gastId)]);
       y += 8;
     }
   }
@@ -2751,7 +2920,12 @@ function AnmeldeStatusKarte({ anmeldung, turnier, jetzt, alsBezahltMelden, fotoE
 
 // Zeigt einen Spielplan (Gruppenphase oder K.o.) an. Im bearbeitbaren Modus können Ergebnisse
 // eingetragen werden; sonst ist es eine reine Lese-Ansicht für Teilnehmer.
-function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern, onZeitSpeichern }) {
+function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern, onZeitSpeichern, onGruppeVerschieben }) {
+  const [vereinsFilter, setVereinsFilter] = useState("");
+  const [ziehTeam, setZiehTeam] = useState(null); // Mannschaft, die gerade per Drag and Drop gezogen wird
+  const [dropZiel, setDropZiel] = useState(null); // "g:<gruppenId>" (verschieben) oder "t:<teamId>" (tauschen)
+  const [verschiebeHinweis, setVerschiebeHinweis] = useState("");
+
   const teamName = (id) => {
     if (!id) return "Freilos";
     if (plan.teamNamen && plan.teamNamen[id]) return plan.teamNamen[id];
@@ -2759,64 +2933,210 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
     return t ? t.verein : "–";
   };
 
+  // Fortlaufende Spielnummern und Vereinsfilter (Teilwort, Groß-/Kleinschreibung egal)
+  const { nummern, gesamt } = spielNummernBerechnen(plan);
+  const filterBegriff = vereinsFilter.trim().toLowerCase();
+  const teamPasst = (id) => filterBegriff !== "" && !!id && teamName(id).toLowerCase().includes(filterBegriff);
+  const spielPasst = (s) => filterBegriff === "" || teamPasst(s.heimId) || teamPasst(s.gastId);
+  const alleSpiele = [
+    ...(plan.spiele || []),
+    ...(plan.runden ? plan.runden.flat().filter((s) => !s.freilos) : []),
+    ...(plan.platz3Spiel ? [plan.platz3Spiel] : []),
+  ];
+  const trefferAnzahl = alleSpiele.filter(spielPasst).length;
+  const gruppenNameVon = {};
+  (plan.gruppen || []).forEach((g) => { gruppenNameVon[g.id] = g.name; });
+
+  // Mannschaften zwischen Gruppen verschieben/tauschen: nur im Admin-Bereich und nur, solange
+  // die K.o.-Endrunde noch nicht gestartet ist.
+  const verschiebenErlaubt = !!(bearbeitbar && onGruppeVerschieben && plan.gruppen && plan.gruppen.length > 1 && !plan.runden);
+  const gruppeVonTeam = (teamId) => {
+    const g = (plan.gruppen || []).find((x) => x.teamIds.includes(teamId));
+    return g ? g.id : null;
+  };
+  const verschiebeAusfuehren = (teamId, zielGruppeId, tauschTeamId) => {
+    setVerschiebeHinweis("");
+    const ergebnis = gruppenMannschaftVerschieben(plan, teamId, zielGruppeId, tauschTeamId);
+    if (ergebnis.fehler) {
+      setVerschiebeHinweis(ergebnis.fehler);
+      return;
+    }
+    if (!ergebnis.geaendert) return;
+    if (ergebnis.betroffeneMitErgebnis > 0) {
+      const ok = confirm(
+        `Für ${ergebnis.betroffeneMitErgebnis} Spiel(e) sind bereits Ergebnisse eingetragen. ` +
+        `Diese Ergebnisse gehen beim ${tauschTeamId ? "Tauschen" : "Verschieben"} verloren. Trotzdem fortfahren?`
+      );
+      if (!ok) return;
+    }
+    onGruppeVerschieben(teamId, zielGruppeId, tauschTeamId);
+  };
+
   const gruppenBlock = plan.gruppen ? (
-    <div className="kc-spielplan">
+    <div className="kc-gruppen-raster">
       {plan.gruppen.map((g) => {
         const tabelle = berechneTabelle(g, plan.spiele);
-        const spieleDerGruppe = plan.spiele
-        .filter((s) => s.gruppeId === g.id)
-        .sort((a, b) => (a.uhrzeit || "99:99").localeCompare(b.uhrzeit || "99:99") || (a.feld || 0) - (b.feld || 0));
         return (
-          <div className="kc-gruppe-block" key={g.id}>
+          <div
+            className={"kc-gruppe-block" + (dropZiel === "g:" + g.id ? " kc-drop-aktiv" : "")}
+            key={g.id}
+            onDragOver={verschiebenErlaubt ? (e) => {
+              if (ziehTeam && gruppeVonTeam(ziehTeam) !== g.id) {
+                e.preventDefault();
+                setDropZiel("g:" + g.id);
+              }
+            } : undefined}
+            onDrop={verschiebenErlaubt ? (e) => {
+              e.preventDefault();
+              const teamId = ziehTeam;
+              setZiehTeam(null);
+              setDropZiel(null);
+              if (teamId && gruppeVonTeam(teamId) !== g.id) verschiebeAusfuehren(teamId, g.id, null);
+            } : undefined}
+          >
             <h3 className="kc-h3">{g.name}</h3>
             <table className="kc-tabelle">
               <thead>
-                <tr><th>Verein</th><th>Sp.</th><th>S</th><th>U</th><th>N</th><th>Tore</th><th>Pkt.</th></tr>
+                <tr>
+                  <th>Verein</th><th>Sp.</th><th>S</th><th>U</th><th>N</th><th>Tore</th><th>Pkt.</th>
+                  {verschiebenErlaubt && <th></th>}
+                </tr>
               </thead>
               <tbody>
                 {tabelle.map((r) => (
-                  <tr key={r.teamId}>
-                    <td>{teamName(r.teamId)}</td>
+                  <tr
+                    key={r.teamId}
+                    className={[
+                      teamPasst(r.teamId) ? "kc-zeile-treffer" : "",
+                      verschiebenErlaubt ? "kc-team-ziehbar" : "",
+                      dropZiel === "t:" + r.teamId ? "kc-drop-aktiv" : "",
+                    ].filter(Boolean).join(" ") || undefined}
+                    draggable={verschiebenErlaubt}
+                    onDragStart={verschiebenErlaubt ? (e) => {
+                      setZiehTeam(r.teamId);
+                      e.dataTransfer.effectAllowed = "move";
+                      e.dataTransfer.setData("text/plain", r.teamId);
+                    } : undefined}
+                    onDragEnd={verschiebenErlaubt ? () => { setZiehTeam(null); setDropZiel(null); } : undefined}
+                    onDragOver={verschiebenErlaubt ? (e) => {
+                      if (ziehTeam && ziehTeam !== r.teamId && gruppeVonTeam(ziehTeam) !== g.id) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setDropZiel("t:" + r.teamId);
+                      }
+                    } : undefined}
+                    onDrop={verschiebenErlaubt ? (e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      const teamId = ziehTeam;
+                      setZiehTeam(null);
+                      setDropZiel(null);
+                      if (teamId && teamId !== r.teamId && gruppeVonTeam(teamId) !== g.id) verschiebeAusfuehren(teamId, g.id, r.teamId);
+                    } : undefined}
+                  >
+                    <td>{verschiebenErlaubt && <span className="kc-griff" aria-hidden="true">≡ </span>}{teamName(r.teamId)}</td>
                     <td>{r.spiele}</td>
                     <td>{r.siege}</td>
                     <td>{r.unentschieden}</td>
                     <td>{r.niederlagen}</td>
                     <td>{r.tore}:{r.gegentore}</td>
                     <td><strong>{r.punkte}</strong></td>
+                    {verschiebenErlaubt && (
+                      <td>
+                        <select
+                          className="kc-verschieben-select"
+                          value=""
+                          aria-label={"Mannschaft " + teamName(r.teamId) + " verschieben oder tauschen"}
+                          onChange={(e) => {
+                            const teile = e.target.value.split("|");
+                            if (teile[0] === "move") verschiebeAusfuehren(r.teamId, teile[1], null);
+                            else if (teile[0] === "swap") verschiebeAusfuehren(r.teamId, teile[2], teile[1]);
+                          }}
+                        >
+                          <option value="">⇄</option>
+                          {plan.gruppen.filter((x) => x.id !== g.id).map((x) => (
+                            <optgroup key={x.id} label={x.name}>
+                              <option value={"move|" + x.id}>{"→ nach " + x.name + " verschieben"}</option>
+                              {x.teamIds.map((tid) => (
+                                <option key={tid} value={"swap|" + tid + "|" + x.id}>{"⇄ mit " + teamName(tid) + " tauschen"}</option>
+                              ))}
+                            </optgroup>
+                          ))}
+                        </select>
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>
             </table>
-            <div className="kc-spiele-liste">
-              {spieleDerGruppe.map((s) => (
-                <SpielZeile key={s.id} spiel={s} teamName={teamName} bearbeitbar={bearbeitbar} onSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} />
-              ))}
-            </div>
           </div>
         );
       })}
     </div>
   ) : null;
 
+  // Gesamtspielplan der Gruppenphase: alle Spiele untereinander in zeitlicher Reihenfolge, mit
+  // Spielnummer, Uhrzeit, Feld und Gruppe. Bei gleicher Uhrzeit steht über den Spielen eine Zeit-Überschrift.
+  const spieleChrono = plan.spiele ? gruppenSpieleChronologisch(plan) : [];
+  const sichtbareChrono = spieleChrono.filter(spielPasst);
+  const gesamtplanBlock = plan.spiele ? (
+    <div className="kc-runde-block kc-gesamtplan">
+      <h3 className="kc-h3">{plan.modus === "gruppen_ko" ? "Spielplan Gruppenphase" : "Spielplan"}</h3>
+      {sichtbareChrono.length === 0 ? (
+        <p className="kc-notiz">
+          {filterBegriff !== "" ? `Keine Spiele für ${vereinsFilter.trim()} gefunden.` : "Noch keine Spiele vorhanden."}
+        </p>
+      ) : (
+        <div className="kc-spiele-liste">
+          {sichtbareChrono.map((s, i) => {
+            const vorher = sichtbareChrono[i - 1];
+            const neuerSlot = !vorher || (vorher.uhrzeit || "") !== (s.uhrzeit || "");
+            return (
+              <React.Fragment key={s.id}>
+                {neuerSlot && (
+                  <div className="kc-zeitslot-kopf">{s.uhrzeit ? `🕐 ${s.uhrzeit} Uhr` : "Uhrzeit noch offen"}</div>
+                )}
+                <SpielZeile
+                  spiel={s}
+                  teamName={teamName}
+                  bearbeitbar={bearbeitbar}
+                  onSpeichern={onSpielSpeichern}
+                  onZeitSpeichern={onZeitSpeichern}
+                  nummer={nummern[s.id]}
+                  gruppenName={gruppenNameVon[s.gruppeId]}
+                  hervorheben={filterBegriff}
+                />
+              </React.Fragment>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  ) : null;
+
   const koBlock = plan.runden && plan.modus !== "aufabstieg" ? (
     <div className="kc-spielplan">
-      {plan.runden.map((runde, i) => (
-        <div className="kc-runde-block" key={i}>
-          <h3 className="kc-h3">
-            {i === plan.runden.length - 1 ? "Finale" : i === plan.runden.length - 2 ? "Halbfinale" : `Runde ${i + 1}`}
-          </h3>
-          <div className="kc-spiele-liste">
-            {runde.map((s) => (
-              <SpielZeile key={s.id} spiel={s} teamName={teamName} bearbeitbar={bearbeitbar && !s.freilos} onSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} zeigeSieger />
-            ))}
+      {plan.runden.map((runde, i) => {
+        const sichtbar = runde.filter(spielPasst);
+        if (filterBegriff !== "" && sichtbar.length === 0) return null;
+        return (
+          <div className="kc-runde-block" key={i}>
+            <h3 className="kc-h3">
+              {i === plan.runden.length - 1 ? "Finale" : i === plan.runden.length - 2 ? "Halbfinale" : `Runde ${i + 1}`}
+            </h3>
+            <div className="kc-spiele-liste">
+              {sichtbar.map((s) => (
+                <SpielZeile key={s.id} spiel={s} teamName={teamName} bearbeitbar={bearbeitbar && !s.freilos} onSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} zeigeSieger nummer={nummern[s.id]} hervorheben={filterBegriff} />
+              ))}
+            </div>
           </div>
-        </div>
-      ))}
-      {plan.platz3Spiel && (
+        );
+      })}
+      {plan.platz3Spiel && spielPasst(plan.platz3Spiel) && (
         <div className="kc-runde-block">
           <h3 className="kc-h3">Spiel um Platz 3</h3>
           <div className="kc-spiele-liste">
-            <SpielZeile spiel={plan.platz3Spiel} teamName={teamName} bearbeitbar={bearbeitbar} onSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} zeigeSieger />
+            <SpielZeile spiel={plan.platz3Spiel} teamName={teamName} bearbeitbar={bearbeitbar} onSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} zeigeSieger nummer={nummern[plan.platz3Spiel.id]} hervorheben={filterBegriff} />
           </div>
         </div>
       )}
@@ -2830,21 +3150,25 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
 
   const aufAbstiegBlock = plan.modus === "aufabstieg" ? (
     <div className="kc-spielplan">
-      {plan.runden.map((runde, i) => (
-        <div className="kc-runde-block" key={i}>
-          <h3 className="kc-h3">Runde {i + 1}</h3>
-          <div className="kc-spiele-liste">
-            {[...runde].sort((a, b) => a.tisch - b.tisch).map((s) => (
-              <div key={s.id} style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                <span className="kc-notiz" style={{ minWidth: "52px" }}>Tisch {s.tisch}</span>
-                <div style={{ flex: 1 }}>
-                  <SpielZeile spiel={s} teamName={teamName} bearbeitbar={bearbeitbar} onSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} zeigeSieger />
+      {plan.runden.map((runde, i) => {
+        const sichtbar = [...runde].sort((a, b) => a.tisch - b.tisch).filter(spielPasst);
+        if (filterBegriff !== "" && sichtbar.length === 0) return null;
+        return (
+          <div className="kc-runde-block" key={i}>
+            <h3 className="kc-h3">Runde {i + 1}</h3>
+            <div className="kc-spiele-liste">
+              {sichtbar.map((s) => (
+                <div key={s.id} style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  <span className="kc-notiz" style={{ minWidth: "52px" }}>Tisch {s.tisch}</span>
+                  <div style={{ flex: 1 }}>
+                    <SpielZeile spiel={s} teamName={teamName} bearbeitbar={bearbeitbar} onSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} zeigeSieger nummer={nummern[s.id]} hervorheben={filterBegriff} />
+                  </div>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
       {aufAbstiegAlleFertig && (
         <div className="kc-runde-block">
           <h3 className="kc-h3">Endtabelle</h3>
@@ -2870,7 +3194,33 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
           </button>
         </div>
       )}
+      <div className="kc-spielplan-filter">
+        <input
+          className="kc-input"
+          type="search"
+          value={vereinsFilter}
+          onChange={(e) => setVereinsFilter(e.target.value)}
+          placeholder="Verein suchen (z. B. Hombruch) …"
+          aria-label="Spiele nach Verein filtern"
+        />
+        {filterBegriff !== "" && (
+          <button type="button" className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => setVereinsFilter("")}>
+            Zurücksetzen
+          </button>
+        )}
+        <span className="kc-notiz kc-spielplan-zaehler">
+          {filterBegriff !== "" ? `${trefferAnzahl} von ${gesamt} Spielen` : `${gesamt} Spiele insgesamt`}
+        </span>
+      </div>
+      {verschiebenErlaubt && (
+        <p className="kc-notiz kc-verschiebe-hinweis">
+          Mannschaften lassen sich per Drag and Drop in eine andere Gruppe ziehen: auf eine Mannschaft ziehen = tauschen,
+          auf die Gruppe ziehen = verschieben. Am Handy geht es über das Auswahlfeld ⇄ in der Tabelle.
+        </p>
+      )}
+      {verschiebeHinweis && <p className="kc-fehler">{verschiebeHinweis}</p>}
       {gruppenBlock}
+      {gesamtplanBlock}
       {plan.modus === "gruppen_ko" && !plan.runden && (
         <p className="kc-hinweis" style={{ margin: "10px 0" }}>
           Die K.o.-Endrunde ist noch nicht gestartet – das kann der Veranstalter tun, sobald alle Gruppenspiele feststehen.
@@ -2895,7 +3245,14 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
   );
 }
 
-function SpielZeile({ spiel, teamName, bearbeitbar, onSpeichern, onZeitSpeichern, zeigeSieger }) {
+// Hebt den Suchbegriff (Vereinsfilter) im Teamnamen hervor.
+function teamNameMitTreffer(name, begriff) {
+  const b = (begriff || "").trim().toLowerCase();
+  if (!b || !name || !String(name).toLowerCase().includes(b)) return name;
+  return <span className="kc-team-treffer">{name}</span>;
+}
+
+function SpielZeile({ spiel, teamName, bearbeitbar, onSpeichern, onZeitSpeichern, zeigeSieger, nummer, gruppenName, hervorheben }) {
   const [heim, setHeim] = useState(spiel.heimTore ?? "");
   const [gast, setGast] = useState(spiel.gastTore ?? "");
   const [siegerWahl, setSiegerWahl] = useState("");
@@ -2936,6 +3293,9 @@ function SpielZeile({ spiel, teamName, bearbeitbar, onSpeichern, onZeitSpeichern
         </div>
       ) : (
         <span className="kc-spiel-meta">
+          {nummer ? <strong className="kc-spiel-nr">Spiel {nummer}</strong> : null}
+          {nummer ? "  " : ""}
+          {gruppenName ? `${gruppenName}  ` : ""}
           {spiel.rueckspiel ? "🔁 Rückspiel  " : ""}
           {spiel.uhrzeit ? `🕐 ${spiel.uhrzeit} Uhr${spiel.feld ? ` · Feld ${spiel.feld}` : ""}` : bearbeitbar && onZeitSpeichern ? "Uhrzeit/Feld noch nicht festgelegt" : ""}
           {bearbeitbar && onZeitSpeichern && (
@@ -2950,7 +3310,7 @@ function SpielZeile({ spiel, teamName, bearbeitbar, onSpeichern, onZeitSpeichern
           )}
         </span>
       )}
-      <span className={zeigeSieger && spiel.sieger === spiel.heimId ? "kc-team-sieger" : ""}>{teamName(spiel.heimId)}</span>
+      <span className={zeigeSieger && spiel.sieger === spiel.heimId ? "kc-team-sieger" : ""}>{teamNameMitTreffer(teamName(spiel.heimId), hervorheben)}</span>
       {bearbeitbar && !wartetAufTeams ? (
         <div className="kc-spiel-eingabe">
           <input className="kc-input kc-input--klein" type="number" min="0" value={heim} onChange={(e) => setHeim(e.target.value)} />
@@ -2960,7 +3320,7 @@ function SpielZeile({ spiel, teamName, bearbeitbar, onSpeichern, onZeitSpeichern
       ) : (
         <span className="kc-spiel-ergebnis">{hatErgebnis ? `${spiel.heimTore} : ${spiel.gastTore}` : wartetAufTeams ? "offen" : "– : –"}</span>
       )}
-      <span className={zeigeSieger && spiel.sieger === spiel.gastId ? "kc-team-sieger" : ""}>{teamName(spiel.gastId)}</span>
+      <span className={zeigeSieger && spiel.sieger === spiel.gastId ? "kc-team-sieger" : ""}>{teamNameMitTreffer(teamName(spiel.gastId), hervorheben)}</span>
       {bearbeitbar && !wartetAufTeams && (
         <div className="kc-spiel-aktionen">
           {zeigeSieger && heim !== "" && gast !== "" && Number(heim) === Number(gast) && (
@@ -3261,7 +3621,7 @@ function TeamNamenBearbeiten({ bestaetigteTeams, teamNamen, onSpeichern }) {
   );
 }
 
-function SpielplanVerwaltung({ turnier, anmeldungen, plan, onErstellen, onSpielSpeichern, onZeitSpeichern, onEndrundeStarten, onNamenSpeichern, onNeuErstellen }) {
+function SpielplanVerwaltung({ turnier, anmeldungen, plan, onErstellen, onSpielSpeichern, onZeitSpeichern, onGruppeVerschieben, onEndrundeStarten, onNamenSpeichern, onNeuErstellen }) {
   const bestaetigteTeams = anmeldungen.filter((a) => a.turnierId === turnier.id && a.status === "bestaetigt");
   const spielplanLink = `${window.location.origin}${window.location.pathname}?turnier=${encodeURIComponent(turnier.id)}&ansicht=spielplan`;
   const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(spielplanLink)}`;
@@ -3290,7 +3650,7 @@ function SpielplanVerwaltung({ turnier, anmeldungen, plan, onErstellen, onSpielS
 
           <TeamNamenBearbeiten bestaetigteTeams={bestaetigteTeams} teamNamen={plan.teamNamen} onSpeichern={onNamenSpeichern} />
 
-          <SpielplanAnzeige plan={plan} teams={anmeldungen} turnier={turnier} bearbeitbar onSpielSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} />
+          <SpielplanAnzeige plan={plan} teams={anmeldungen} turnier={turnier} bearbeitbar onSpielSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} onGruppeVerschieben={onGruppeVerschieben} />
 
           {endrundeAusstehend && <EndrundeStarten onEndrundeStarten={onEndrundeStarten} turnier={turnier} />}
         </>
@@ -4186,6 +4546,22 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     }
   };
 
+  // Verschiebt (oder tauscht) eine Mannschaft zwischen zwei Gruppen. Die Berechnung steckt in
+  // gruppenMannschaftVerschieben; hier wird nur das Ergebnis gespeichert.
+  const gruppeVerschieben = async (turnierId, teamId, zielGruppeId, tauschTeamId) => {
+    const plan = spielplaene.find((p) => p.turnierId === turnierId);
+    if (!plan) return;
+    const ergebnis = gruppenMannschaftVerschieben(plan, teamId, zielGruppeId, tauschTeamId);
+    if (ergebnis.fehler) { alert(ergebnis.fehler); return; }
+    if (!ergebnis.geaendert) return;
+    try {
+      const zeile = await supabaseUpdate("spielplaene", plan.id, spielplanZuDb(ergebnis.plan), session.access_token);
+      setSpielplaene((prev) => prev.map((p) => (p.id === plan.id ? spielplanAusDb(zeile[0]) : p)));
+    } catch (e) {
+      alert("Mannschaft konnte nicht verschoben werden: " + e.message);
+    }
+  };
+
   // Ändert nur die Anzeige im Spielplan (z. B. "Kickers Lila" statt zweimal "Kickers"),
   // ohne die eigentliche Anmeldung/Kontaktdaten anzufassen.
   const teamNamenSpeichern = async (turnierId, teamId, name) => {
@@ -4280,6 +4656,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
           onErstellen={(modus, anzahlGruppen, zeitOptionen, zusatzOptionen) => spielplanErstellen(offenerSpielplanTurnier, modus, anzahlGruppen, zeitOptionen, zusatzOptionen)}
           onSpielSpeichern={(spielId, h, g, sieger) => spielSpeichern(offenerSpielplanTurnier.id, spielId, h, g, sieger)}
           onZeitSpeichern={(spielId, uhrzeit, feld) => zeitSpeichern(offenerSpielplanTurnier.id, spielId, uhrzeit, feld)}
+          onGruppeVerschieben={(teamId, zielGruppeId, tauschTeamId) => gruppeVerschieben(offenerSpielplanTurnier.id, teamId, zielGruppeId, tauschTeamId)}
           onEndrundeStarten={(zeitOptionen) => endrundeStarten(offenerSpielplanTurnier, plan, zeitOptionen)}
           onNamenSpeichern={(teamId, name) => teamNamenSpeichern(offenerSpielplanTurnier.id, teamId, name)}
           onNeuErstellen={() => spielplanNeuErstellen(offenerSpielplanTurnier)}
@@ -6131,6 +6508,22 @@ const CSS = `
 .kc-section--code { border-top: 1px solid #E0E6DE; padding-top: 22px; }
 .kc-code-zeile { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
 .kc-code-zeile .kc-input { flex: 1; min-width: 180px; }
+/* Spielplan: Gruppen nebeneinander, Filter, Nummerierung, Mannschaften verschieben */
+.kc-gruppen-raster { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 14px; width: min(1120px, calc(100vw - 36px)); position: relative; left: 50%; transform: translateX(-50%); }
+.kc-gruppen-raster .kc-gruppe-block { min-width: 0; overflow-x: auto; }
+.kc-gruppe-block.kc-drop-aktiv { outline: 2px dashed var(--kc-green, #2e7d32); outline-offset: -2px; }
+.kc-ziehbar { cursor: grab; }
+.kc-ziehbar.kc-drop-aktiv { background: rgba(46,125,50,0.12); }
+.kc-griff { color: var(--kc-muted); user-select: none; }
+.kc-verschieben-select { font-size: 12px; max-width: 110px; padding: 2px 4px; }
+.kc-zeitslot-kopf { font-weight: 700; font-size: 13px; margin: 14px 0 6px; padding-bottom: 4px; border-bottom: 1px solid rgba(0,0,0,0.1); }
+.kc-spiel-nr { color: var(--kc-green, #2e7d32); }
+.kc-zeile-treffer td { background: #fff8cc; }
+.kc-team-treffer { background: #fff3a8; border-radius: 3px; padding: 0 3px; font-weight: 700; }
+.kc-spielplan-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+.kc-spielplan-filter .kc-input { flex: 1 1 220px; }
+.kc-spielplan-zaehler { font-size: 13px; color: var(--kc-muted); }
+.kc-verschiebe-hinweis { font-size: 12.5px; color: var(--kc-muted); margin: 0; }
 .kc-fehler { color: var(--kc-red); font-size: 13.5px; margin-top: 8px; }
 
 .kc-status-karte { background: var(--kc-card); border-radius: 14px; padding: 22px; box-shadow: 0 1px 3px rgba(22,48,32,0.08); }
