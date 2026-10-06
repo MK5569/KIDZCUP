@@ -973,6 +973,53 @@ function gruppenMannschaftVerschieben(plan, teamId, zielGruppeId, tauschTeamId) 
   return { plan: neu, betroffeneMitErgebnis: betroffen, geaendert: true, fehler: null };
 }
 
+// Format "Gruppenphase + Halbfinale + Finale": genau 4 Mannschaften erreichen das Halbfinale.
+// Je Gruppe kommen gleich viele weiter (4 / Gruppenanzahl, abgerundet); übrige Plätze gehen an die
+// besten Nächstplatzierten (Punkte, Tordifferenz, Tore). Paarung nach Setzliste (1-4, 2-3), wobei
+// Duelle zweier Mannschaften derselben Gruppe möglichst vermieden werden.
+function halbfinalePaarungen(plan) {
+  const gruppen = plan.gruppen || [];
+  const tabellen = gruppen.map((g) => berechneTabelle(g, plan.spiele));
+  const k = tabellen.length;
+  if (k === 0) return null;
+  const gesamt = tabellen.reduce((a, t) => a + t.length, 0);
+  if (gesamt < 4) return null;
+  const basis = Math.floor(4 / k);
+  const bewertung = (r) => [r.punkte, r.tore - r.gegentore, r.tore];
+  const vergleich = (a, b) => {
+    const x = bewertung(a), y = bewertung(b);
+    for (let i = 0; i < 3; i++) if (y[i] !== x[i]) return y[i] - x[i];
+    return 0;
+  };
+  const kandidaten = [];
+  const nachruecker = [];
+  tabellen.forEach((t, gi) => {
+    t.forEach((r, platz) => {
+      const eintrag = { ...r, gruppe: gi, platz };
+      if (platz < basis) kandidaten.push(eintrag);
+      else if (platz === basis) nachruecker.push(eintrag);
+    });
+  });
+  const fehlend = 4 - kandidaten.length;
+  const rest = nachruecker.sort(vergleich).slice(0, Math.max(0, fehlend));
+  const feld = [...kandidaten, ...rest];
+  if (feld.length < 4) return null;
+  const gesetzt = feld.sort((a, b) => a.platz - b.platz || vergleich(a, b));
+  const optionen = [[[0, 3], [1, 2]], [[0, 2], [1, 3]], [[0, 1], [2, 3]]];
+  const ohneGruppenduell = optionen.find((o) => o.every(([x, y]) => gesetzt[x].gruppe !== gesetzt[y].gruppe));
+  const wahl = ohneGruppenduell || optionen[0];
+  return wahl.map(([x, y]) => [gesetzt[x].teamId, gesetzt[y].teamId]);
+}
+
+function erstelleHalbfinalePlan(plan, optionen) {
+  const paarungen = halbfinalePaarungen(plan);
+  if (!paarungen) return null;
+  const runde1 = paarungen.map(([h, g]) => neuesSpiel(h, g, { sieger: null }));
+  const finale = [neuesSpiel(null, null, { sieger: null })];
+  const platz3Spiel = optionen?.spielUmPlatz3 ? neuesSpiel(null, null, {}) : null;
+  return { runden: [runde1, finale], platz3Spiel };
+}
+
 // Erstellt clientseitig ein einfaches, druckbares PDF des aktuellen Spielplans (ohne Server).
 // Zeichnet eine Tabellenzeile mit echten Zellrahmen (Raster-Optik). spaltenBreiten und werte müssen
 // gleich lang sein. Mit kopf=true wird die Zeile fett und farbig hinterlegt (für Kopfzeilen).
@@ -1793,7 +1840,9 @@ function spielplanAusDb(p) {
     erstelltAm: p.erstellt_am,
     platz3Spiel: p.platz3spiel || null,
     mitRueckrunde: !!p.mit_rueckrunde,
-    qualifiziertProGruppe: p.qualifiziert_pro_gruppe || null,
+    // Marker ohne neue DB-Spalte: Werte ab 100 bedeuten "Gruppen + Halbfinale + Finale" (Wert minus 100 = Qualifizierte je Gruppe)
+    qualifiziertProGruppe: p.qualifiziert_pro_gruppe >= 100 ? p.qualifiziert_pro_gruppe - 100 : (p.qualifiziert_pro_gruppe || null),
+    halbfinaleFix: p.qualifiziert_pro_gruppe >= 100,
     spielUmPlatz3Wunsch: !!p.spiel_um_platz3_wunsch,
     teamNamen: p.team_namen || {},
   };
@@ -1803,7 +1852,7 @@ function spielplanZuDb(p) {
     id: p.id, turnier_id: p.turnierId, modus: p.modus, gruppen: p.gruppen || null, spiele: p.spiele || null, runden: p.runden || null,
     platz3spiel: p.platz3Spiel || null,
     mit_rueckrunde: !!p.mitRueckrunde,
-    qualifiziert_pro_gruppe: p.qualifiziertProGruppe || null,
+    qualifiziert_pro_gruppe: p.halbfinaleFix ? 100 + (p.qualifiziertProGruppe || 1) : (p.qualifiziertProGruppe || null),
     spiel_um_platz3_wunsch: !!p.spielUmPlatz3Wunsch,
     team_namen: p.teamNamen || {},
   };
@@ -3343,8 +3392,8 @@ function SpielZeile({ spiel, teamName, bearbeitbar, onSpeichern, onZeitSpeichern
 // werden (intern weiterhin als "gruppen_ko" gespeichert) und/oder als Zufalls-Teilspielplan laufen,
 // bei dem jede Mannschaft nur gegen eine zufällige Auswahl der anderen spielt statt gegen alle.
 function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
-  const [modus, setModus] = useState("liga");
-  const [anzahlGruppen, setAnzahlGruppen] = useState(1);
+  const [modus, setModus] = useState("gruppen_hf");
+  const [anzahlGruppen, setAnzahlGruppen] = useState(2);
   const [mitRueckrunde, setMitRueckrunde] = useState(false);
   const [mitEndrunde, setMitEndrunde] = useState(false);
   const [spielUmPlatz3, setSpielUmPlatz3] = useState(false);
@@ -3378,14 +3427,20 @@ function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
                 const neu = e.target.value;
                 setModus(neu);
                 if (neu === "liga") setAnzahlGruppen(1);
-                if (neu === "gruppen" && anzahlGruppen < 2) setAnzahlGruppen(2);
+                if ((neu === "gruppen" || neu === "gruppen_hf") && anzahlGruppen < 2) setAnzahlGruppen(2);
               }}
             >
+              <option value="gruppen_hf">Gruppenphase + Halbfinale + Finale</option>
               <option value="liga">Liga (Jeder gegen Jeden – alle Mannschaften in einer Gruppe)</option>
               <option value="gruppen">Gruppenphase (mehrere Gruppen, jeder gegen jeden)</option>
               <option value="aufabstieg">Auf- und Abstiegssystem (Tische, 1 Gruppe)</option>
               <option value="ko">Turnier (K.o.-System)</option>
             </select>
+            {modus === "gruppen_hf" && (
+              <span className="kc-notiz">
+                Erst spielen die Gruppen jeder gegen jeden, danach kommen die 4 Besten ins Halbfinale, die Sieger spielen das Finale. Bei 2 Gruppen: die zwei Ersten jeder Gruppe, bei 4 Gruppen: alle Gruppensieger.
+              </span>
+            )}
             {modus === "liga" && (
               <span className="kc-notiz">Entspricht dem „Liga"-Modus auf meinspielplan.de: alle Mannschaften spielen in einer einzigen Gruppe.</span>
             )}
@@ -3416,7 +3471,12 @@ function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
               </span>
             </label>
           )}
-          {modus === "gruppen" && (
+          {modus === "gruppen_hf" && anzahlTeams < 4 && (
+            <p className="kc-notiz" style={{ color: "var(--kc-rot, #b3261e)" }}>
+              Für Halbfinale und Finale werden mindestens 4 bestätigte Mannschaften benötigt - aktuell sind es {anzahlTeams}.
+            </p>
+          )}
+          {(modus === "gruppen" || modus === "gruppen_hf") && (
             <label className="kc-feld">
               <span>Anzahl Gruppen</span>
               <input
@@ -3429,7 +3489,7 @@ function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
               />
             </label>
           )}
-          {(modus === "liga" || modus === "gruppen") && (
+          {(modus === "liga" || modus === "gruppen" || modus === "gruppen_hf") && (
             <>
               <label className="kc-checkbox-zeile">
                 <input
@@ -3444,7 +3504,7 @@ function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
               </label>
               {nichtJederGegenJeden && (
                 <label className="kc-feld">
-                  <span>Spiele pro Mannschaft{modus === "gruppen" ? " (je Gruppe)" : ""}</span>
+                  <span>Spiele pro Mannschaft{modus !== "liga" ? " (je Gruppe)" : ""}</span>
                   <input
                     className="kc-input"
                     type="number"
@@ -3464,11 +3524,11 @@ function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
                   <span>Mit Rückrunde (jede Mannschaft spielt zweimal gegeneinander – Hin- und Rückspiel)</span>
                 </label>
               )}
-              <label className="kc-checkbox-zeile">
+              {modus !== "gruppen_hf" && (<label className="kc-checkbox-zeile">
                 <input type="checkbox" checked={mitEndrunde} onChange={(e) => setMitEndrunde(e.target.checked)} />
                 <span>Mit anschließender K.o.-Endrunde für die besten Mannschaften (z. B. Halbfinale + Finale)</span>
-              </label>
-              {mitEndrunde && (
+              </label>)}
+              {modus !== "gruppen_hf" && mitEndrunde && (
                 <label className="kc-feld">
                   <span>Wie viele Mannschaften kommen {modus === "gruppen" ? "pro Gruppe" : "insgesamt"} weiter?</span>
                   <input
@@ -3484,7 +3544,7 @@ function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
               )}
             </>
           )}
-          {(modus === "ko" || (mitEndrunde && (modus === "liga" || modus === "gruppen"))) && (
+          {(modus === "ko" || modus === "gruppen_hf" || (mitEndrunde && (modus === "liga" || modus === "gruppen"))) && (
             <label className="kc-checkbox-zeile">
               <input type="checkbox" checked={spielUmPlatz3} onChange={(e) => setSpielUmPlatz3(e.target.checked)} />
               <span>Spiel um Platz 3 (zwischen den beiden Halbfinal-Verlierern)</span>
@@ -3506,20 +3566,21 @@ function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
           </label>
           <p className="kc-notiz">
             Uhrzeit und Feld werden automatisch verteilt – nach Möglichkeit mit mindestens einer Spielrunde Pause pro Mannschaft.
-            {mitEndrunde && (modus === "liga" || modus === "gruppen") && " Das gilt zunächst nur für die Liga-/Gruppenspiele, die Endrunden-Zeiten fragen wir separat ab, sobald du sie startest."}
+            {(modus === "gruppen_hf" || (mitEndrunde && (modus === "liga" || modus === "gruppen"))) && " Das gilt zunächst nur für die Liga-/Gruppenspiele, die Endrunden-Zeiten fragen wir separat ab, sobald du sie startest."}
             {modus === "aufabstieg" && ` Das gilt nur für Runde 1 - die weiteren Runden stehen ja erst nach den Ergebnissen fest und lassen sich direkt beim jeweiligen Spiel per "festlegen" verplanen.`}
           </p>
           <button
             className="kc-btn kc-btn--primary"
-            disabled={aufAbstiegUngeradeTeams}
+            disabled={aufAbstiegUngeradeTeams || (modus === "gruppen_hf" && anzahlTeams < 4)}
             onClick={() => {
-              const effektiverModus = (modus === "liga" || modus === "gruppen") && mitEndrunde ? "gruppen_ko" : (modus === "liga" ? "gruppen" : modus);
+              const effektiverModus = modus === "gruppen_hf" || ((modus === "liga" || modus === "gruppen") && mitEndrunde) ? "gruppen_ko" : (modus === "liga" ? "gruppen" : modus);
               onErstellen(
                 effektiverModus,
-                modus === "liga" ? 1 : (modus === "gruppen" || effektiverModus === "gruppen_ko" ? anzahlGruppen : null),
+                modus === "liga" ? 1 : (modus === "gruppen" || modus === "gruppen_hf" || effektiverModus === "gruppen_ko" ? anzahlGruppen : null),
                 { startzeit, spieldauerMin, anzahlFelder },
                 {
                   mitRueckrunde,
+                  halbfinaleFix: modus === "gruppen_hf",
                   spielUmPlatz3,
                   qualifiziertProGruppe,
                   spieleProMannschaft: nichtJederGegenJeden ? Math.min(spieleProMannschaft, maxSpieleProMannschaft) : null,
@@ -3539,17 +3600,17 @@ function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
 // Kleines Extra-Formular: startet die K.o.-Endrunde einer "Gruppe + Endrunde"-Kombination,
 // sobald die Gruppenphase abgeschlossen ist. Fragt eigene Startzeit/Spieldauer/Felder ab, da die
 // Endrunde meist zu einem späteren Zeitpunkt am Turniertag beginnt.
-function EndrundeStarten({ onEndrundeStarten, turnier }) {
+function EndrundeStarten({ onEndrundeStarten, turnier, halbfinale }) {
   const [startzeit, setStartzeit] = useState(turnier?.uhrzeit || "13:00");
   const [spieldauerMin, setSpieldauerMin] = useState(20);
   const [anzahlFelder, setAnzahlFelder] = useState(1);
 
   return (
     <div className="kc-section kc-formular-karte" style={{ marginTop: "16px" }}>
-      <h2 className="kc-h2">K.o.-Endrunde starten</h2>
+      <h2 className="kc-h2">{halbfinale ? "Halbfinale & Finale starten" : "K.o.-Endrunde starten"}</h2>
       <p className="kc-sub">
-        Ermittelt automatisch die besten Mannschaften je Gruppe (nach aktueller Tabelle) und baut
-        daraus die Endrunde. Am besten erst starten, wenn alle Gruppenspiele feststehen.
+        {halbfinale ? "Die 4 Besten aus der Gruppenphase (nach aktueller Tabelle) spielen im Halbfinale, die Sieger im Finale. Am besten erst starten, wenn alle Gruppenspiele feststehen." : null}
+        {halbfinale ? null : "Ermittelt automatisch die besten Mannschaften je Gruppe (nach aktueller Tabelle) und baut daraus die Endrunde. Am besten erst starten, wenn alle Gruppenspiele feststehen."}
       </p>
       <div className="kc-formular">
         <div className="kc-feld-reihe">
@@ -3652,7 +3713,7 @@ function SpielplanVerwaltung({ turnier, anmeldungen, plan, onErstellen, onSpielS
 
           <SpielplanAnzeige plan={plan} teams={anmeldungen} turnier={turnier} bearbeitbar onSpielSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} onGruppeVerschieben={onGruppeVerschieben} />
 
-          {endrundeAusstehend && <EndrundeStarten onEndrundeStarten={onEndrundeStarten} turnier={turnier} />}
+          {endrundeAusstehend && <EndrundeStarten onEndrundeStarten={onEndrundeStarten} turnier={turnier} halbfinale={!!plan.halbfinaleFix} />}
         </>
       )}
     </div>
@@ -4466,6 +4527,10 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
       if (modus === "gruppen_ko") {
         neuerPlan.modus = "gruppen_ko";
         neuerPlan.qualifiziertProGruppe = qualifiziertProGruppe || 2;
+        if (zusatzOptionen && zusatzOptionen.halbfinaleFix) {
+          neuerPlan.halbfinaleFix = true;
+          neuerPlan.qualifiziertProGruppe = Math.max(1, Math.ceil(4 / Math.max(1, anzahlGruppen)));
+        }
         neuerPlan.spielUmPlatz3Wunsch = !!spielUmPlatz3;
       }
     } else if (modus === "aufabstieg") {
@@ -4488,6 +4553,19 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
   // je Gruppe (nach Tabelle) und baut daraus einen frischen K.o.-Baum, der an die bestehende
   // Gruppenphase angehängt wird - die Gruppendaten selbst bleiben dabei vollständig erhalten.
   const endrundeStarten = async (turnier, plan, zeitOptionen) => {
+    if (plan.halbfinaleFix) {
+      const hf = erstelleHalbfinalePlan(plan, { spielUmPlatz3: plan.spielUmPlatz3Wunsch });
+      if (!hf) { alert("Für Halbfinale und Finale werden mindestens 4 Mannschaften in den Gruppen benötigt."); return; }
+      if (zeitOptionen) zeitenZuweisenAnListe(hf.runden[0], zeitOptionen);
+      const fertig = { ...plan, runden: hf.runden, platz3Spiel: hf.platz3Spiel };
+      try {
+        const zeile = await supabaseUpdate("spielplaene", plan.id, spielplanZuDb(fertig), session.access_token);
+        setSpielplaene((prev) => prev.map((p) => (p.id === plan.id ? spielplanAusDb(zeile[0]) : p)));
+      } catch (e) {
+        alert("Endrunde konnte nicht gestartet werden: " + e.message);
+      }
+      return;
+    }
     const proGruppeQualifiziert = plan.gruppen.flatMap((g) => {
       const tabelle = berechneTabelle(g, plan.spiele);
       return tabelle.slice(0, plan.qualifiziertProGruppe || 2).map((r) => r.teamId);
