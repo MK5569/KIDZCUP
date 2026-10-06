@@ -892,7 +892,10 @@ function zeitOptionenAusPlan(plan) {
 //    Zielgruppe entstehen neue Spiele (am Ende des Gruppenplans eingeplant). Alle übrigen Spiele und
 //    Ergebnisse bleiben unverändert erhalten.
 // Rückgabe: { plan, betroffeneMitErgebnis, geaendert, fehler }
-function gruppenMannschaftVerschieben(plan, teamId, zielGruppeId, tauschTeamId) {
+// Optional zielIndex (0-basiert): gewünschte Position in der Anzeigereihenfolge der Zielgruppe.
+// Innerhalb derselben Gruppe ändert das nur die Reihenfolge (Setzliste/Gleichstand), Spiele bleiben
+// unberührt; beim Verschieben in eine andere Gruppe bestimmt es die Position der Mannschaft dort.
+function gruppenMannschaftVerschieben(plan, teamId, zielGruppeId, tauschTeamId, zielIndex) {
   const neu = JSON.parse(JSON.stringify(plan));
   const unveraendert = (fehler) => ({ plan: neu, betroffeneMitErgebnis: 0, geaendert: false, fehler: fehler || null });
 
@@ -902,7 +905,21 @@ function gruppenMannschaftVerschieben(plan, teamId, zielGruppeId, tauschTeamId) 
   const quelle = neu.gruppen.find((g) => g.teamIds.includes(teamId));
   const ziel = neu.gruppen.find((g) => g.id === zielGruppeId);
   if (!quelle || !ziel) return unveraendert("Gruppe oder Mannschaft wurde nicht gefunden.");
-  if (quelle.id === ziel.id) return unveraendert(null);
+  const mitPosition = zielIndex !== undefined && zielIndex !== null && !Number.isNaN(Number(zielIndex));
+  // Anzeigereihenfolge der Zielgruppe VOR der Änderung (Tabelle nach Punkten, bei Gleichstand teamIds-Reihenfolge)
+  const zielReihenfolge = berechneTabelle(ziel, plan.spiele).map((r) => r.teamId);
+  const einsortieren = (liste, id, index) => {
+    const ohne = liste.filter((x) => x !== id);
+    const i = Math.max(0, Math.min(ohne.length, Number(index)));
+    return [...ohne.slice(0, i), id, ...ohne.slice(i)];
+  };
+  if (quelle.id === ziel.id) {
+    if (!mitPosition) return unveraendert(null);
+    const neueReihenfolge = einsortieren(zielReihenfolge, teamId, zielIndex);
+    const geaendert = neueReihenfolge.some((id, i) => id !== zielReihenfolge[i]);
+    quelle.teamIds = neueReihenfolge;
+    return { plan: neu, betroffeneMitErgebnis: 0, geaendert, fehler: null };
+  }
 
   const hatErgebnis = (s) => s.heimTore !== null && s.gastTore !== null;
   const beteiligt = (s, id) => s.heimId === id || s.gastId === id;
@@ -968,7 +985,7 @@ function gruppenMannschaftVerschieben(plan, teamId, zielGruppeId, tauschTeamId) 
   neu.spiele = neu.spiele.filter((s) => !(s.gruppeId === quelle.id && beteiligt(s, teamId)));
   neu.spiele.push(...neueSpiele);
   quelle.teamIds = quelle.teamIds.filter((id) => id !== teamId);
-  ziel.teamIds = [...ziel.teamIds, teamId];
+  ziel.teamIds = mitPosition ? einsortieren(zielReihenfolge, teamId, zielIndex) : [...ziel.teamIds, teamId];
 
   return { plan: neu, betroffeneMitErgebnis: betroffen, geaendert: true, fehler: null };
 }
@@ -2998,14 +3015,15 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
 
   // Mannschaften zwischen Gruppen verschieben/tauschen: nur im Admin-Bereich und nur, solange
   // die K.o.-Endrunde noch nicht gestartet ist.
-  const verschiebenErlaubt = !!(bearbeitbar && onGruppeVerschieben && plan.gruppen && plan.gruppen.length > 1 && !plan.runden);
+  const ordnenErlaubt = !!(bearbeitbar && onGruppeVerschieben && plan.gruppen && !plan.runden); // Reihenfolge ändern (auch bei nur 1 Gruppe)
+  const verschiebenErlaubt = !!(ordnenErlaubt && plan.gruppen.length > 1); // zusätzlich zwischen Gruppen verschieben/tauschen
   const gruppeVonTeam = (teamId) => {
     const g = (plan.gruppen || []).find((x) => x.teamIds.includes(teamId));
     return g ? g.id : null;
   };
-  const verschiebeAusfuehren = (teamId, zielGruppeId, tauschTeamId) => {
+  const verschiebeAusfuehren = (teamId, zielGruppeId, tauschTeamId, zielIndex) => {
     setVerschiebeHinweis("");
-    const ergebnis = gruppenMannschaftVerschieben(plan, teamId, zielGruppeId, tauschTeamId);
+    const ergebnis = gruppenMannschaftVerschieben(plan, teamId, zielGruppeId, tauschTeamId, zielIndex);
     if (ergebnis.fehler) {
       setVerschiebeHinweis(ergebnis.fehler);
       return;
@@ -3018,7 +3036,7 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
       );
       if (!ok) return;
     }
-    onGruppeVerschieben(teamId, zielGruppeId, tauschTeamId);
+    onGruppeVerschieben(teamId, zielGruppeId, tauschTeamId, zielIndex);
   };
 
   const gruppenBlock = plan.gruppen ? (
@@ -3052,45 +3070,49 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
                 </tr>
               </thead>
               <tbody>
-                {tabelle.map((r) => (
+                {tabelle.map((r, zeilenIndex) => (
                   <tr
                     key={r.teamId}
                     className={[
                       teamPasst(r.teamId) ? "kc-zeile-treffer" : "",
-                      verschiebenErlaubt ? "kc-team-ziehbar" : "",
+                      ordnenErlaubt ? "kc-team-ziehbar" : "",
                       dropZiel === "t:" + r.teamId ? "kc-drop-aktiv" : "",
                     ].filter(Boolean).join(" ") || undefined}
-                    draggable={verschiebenErlaubt}
-                    onDragStart={verschiebenErlaubt ? (e) => {
+                    draggable={ordnenErlaubt}
+                    onDragStart={ordnenErlaubt ? (e) => {
                       setZiehTeam(r.teamId);
                       e.dataTransfer.effectAllowed = "move";
                       e.dataTransfer.setData("text/plain", r.teamId);
                     } : undefined}
-                    onDragEnd={verschiebenErlaubt ? () => { setZiehTeam(null); setDropZiel(null); } : undefined}
-                    onDragOver={verschiebenErlaubt ? (e) => {
-                      if (ziehTeam && ziehTeam !== r.teamId && gruppeVonTeam(ziehTeam) !== g.id) {
+                    onDragEnd={ordnenErlaubt ? () => { setZiehTeam(null); setDropZiel(null); } : undefined}
+                    onDragOver={ordnenErlaubt ? (e) => {
+                      if (ziehTeam && ziehTeam !== r.teamId) {
                         e.preventDefault();
                         e.stopPropagation();
                         setDropZiel("t:" + r.teamId);
                       }
                     } : undefined}
-                    onDrop={verschiebenErlaubt ? (e) => {
+                    onDrop={ordnenErlaubt ? (e) => {
                       e.preventDefault();
                       e.stopPropagation();
                       const teamId = ziehTeam;
                       setZiehTeam(null);
                       setDropZiel(null);
-                      if (teamId && teamId !== r.teamId && gruppeVonTeam(teamId) !== g.id) verschiebeAusfuehren(teamId, g.id, r.teamId);
+                      if (!teamId || teamId === r.teamId) return;
+                      // gleiche Gruppe: Reihenfolge ändern (Mannschaft landet an der Position der Zielzeile);
+                      // andere Gruppe: tauschen
+                      if (gruppeVonTeam(teamId) === g.id) verschiebeAusfuehren(teamId, g.id, null, zeilenIndex);
+                      else verschiebeAusfuehren(teamId, g.id, r.teamId);
                     } : undefined}
                   >
-                    <td>{verschiebenErlaubt && <span className="kc-griff" aria-hidden="true">≡ </span>}{teamName(r.teamId)}</td>
+                    <td>{ordnenErlaubt && <span className="kc-griff" aria-hidden="true">≡ </span>}{teamName(r.teamId)}</td>
                     <td>{r.spiele}</td>
                     <td>{r.siege}</td>
                     <td>{r.unentschieden}</td>
                     <td>{r.niederlagen}</td>
                     <td>{r.tore}:{r.gegentore}</td>
                     <td><strong>{r.punkte}</strong></td>
-                    {verschiebenErlaubt && (
+                    {ordnenErlaubt && (
                       <td>
                         <select
                           className="kc-verschieben-select"
@@ -3099,13 +3121,23 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
                           onChange={(e) => {
                             const teile = e.target.value.split("|");
                             if (teile[0] === "move") verschiebeAusfuehren(r.teamId, teile[1], null);
+                            else if (teile[0] === "pos") verschiebeAusfuehren(r.teamId, teile[1], null, Number(teile[2]));
+                            else if (teile[0] === "moveat") verschiebeAusfuehren(r.teamId, teile[1], null, Number(teile[2]));
                             else if (teile[0] === "swap") verschiebeAusfuehren(r.teamId, teile[2], teile[1]);
                           }}
                         >
                           <option value="">⇄</option>
-                          {plan.gruppen.filter((x) => x.id !== g.id).map((x) => (
+                          <optgroup label={"In " + g.name + ": Reihenfolge"}>
+                            {tabelle.map((_, n) => (n === zeilenIndex ? null : (
+                              <option key={n} value={"pos|" + g.id + "|" + n}>{"↕ auf Position " + (n + 1)}</option>
+                            )))}
+                          </optgroup>
+                          {verschiebenErlaubt && plan.gruppen.filter((x) => x.id !== g.id).map((x) => (
                             <optgroup key={x.id} label={x.name}>
-                              <option value={"move|" + x.id}>{"→ nach " + x.name + " verschieben"}</option>
+                              <option value={"move|" + x.id}>{"→ nach " + x.name + " verschieben (ans Ende)"}</option>
+                              {Array.from({ length: x.teamIds.length }, (_, n) => (
+                                <option key={"p" + n} value={"moveat|" + x.id + "|" + n}>{"→ nach " + x.name + " auf Position " + (n + 1)}</option>
+                              ))}
                               {x.teamIds.map((tid) => (
                                 <option key={tid} value={"swap|" + tid + "|" + x.id}>{"⇄ mit " + teamName(tid) + " tauschen"}</option>
                               ))}
@@ -3261,10 +3293,11 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
           {filterBegriff !== "" ? `${trefferAnzahl} von ${gesamt} Spielen` : `${gesamt} Spiele insgesamt`}
         </span>
       </div>
-      {verschiebenErlaubt && (
+      {ordnenErlaubt && (
         <p className="kc-notiz kc-verschiebe-hinweis">
-          Mannschaften lassen sich per Drag and Drop in eine andere Gruppe ziehen: auf eine Mannschaft ziehen = tauschen,
-          auf die Gruppe ziehen = verschieben. Am Handy geht es über das Auswahlfeld ⇄ in der Tabelle.
+          Mannschaften lassen sich per Drag and Drop bewegen: in der eigenen Gruppe auf eine andere Mannschaft ziehen = Reihenfolge ändern;
+          {verschiebenErlaubt ? " auf eine Mannschaft einer anderen Gruppe ziehen = tauschen, auf die Gruppe ziehen = verschieben (ans Ende)." : ""}
+          {" "}Am Handy oder für eine genaue Position: Auswahlfeld ⇄ in der Tabelle. Die Reihenfolge zählt vor dem Turnier und bei Punktgleichheit - sonst sortiert die Tabelle nach Punkten.
         </p>
       )}
       {verschiebeHinweis && <p className="kc-fehler">{verschiebeHinweis}</p>}
@@ -4626,10 +4659,10 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
 
   // Verschiebt (oder tauscht) eine Mannschaft zwischen zwei Gruppen. Die Berechnung steckt in
   // gruppenMannschaftVerschieben; hier wird nur das Ergebnis gespeichert.
-  const gruppeVerschieben = async (turnierId, teamId, zielGruppeId, tauschTeamId) => {
+  const gruppeVerschieben = async (turnierId, teamId, zielGruppeId, tauschTeamId, zielIndex) => {
     const plan = spielplaene.find((p) => p.turnierId === turnierId);
     if (!plan) return;
-    const ergebnis = gruppenMannschaftVerschieben(plan, teamId, zielGruppeId, tauschTeamId);
+    const ergebnis = gruppenMannschaftVerschieben(plan, teamId, zielGruppeId, tauschTeamId, zielIndex);
     if (ergebnis.fehler) { alert(ergebnis.fehler); return; }
     if (!ergebnis.geaendert) return;
     try {
@@ -4734,7 +4767,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
           onErstellen={(modus, anzahlGruppen, zeitOptionen, zusatzOptionen) => spielplanErstellen(offenerSpielplanTurnier, modus, anzahlGruppen, zeitOptionen, zusatzOptionen)}
           onSpielSpeichern={(spielId, h, g, sieger) => spielSpeichern(offenerSpielplanTurnier.id, spielId, h, g, sieger)}
           onZeitSpeichern={(spielId, uhrzeit, feld) => zeitSpeichern(offenerSpielplanTurnier.id, spielId, uhrzeit, feld)}
-          onGruppeVerschieben={(teamId, zielGruppeId, tauschTeamId) => gruppeVerschieben(offenerSpielplanTurnier.id, teamId, zielGruppeId, tauschTeamId)}
+          onGruppeVerschieben={(teamId, zielGruppeId, tauschTeamId, zielIndex) => gruppeVerschieben(offenerSpielplanTurnier.id, teamId, zielGruppeId, tauschTeamId, zielIndex)}
           onEndrundeStarten={(zeitOptionen) => endrundeStarten(offenerSpielplanTurnier, plan, zeitOptionen)}
           onNamenSpeichern={(teamId, name) => teamNamenSpeichern(offenerSpielplanTurnier.id, teamId, name)}
           onNeuErstellen={() => spielplanNeuErstellen(offenerSpielplanTurnier)}
@@ -6590,8 +6623,8 @@ const CSS = `
 .kc-gruppen-raster { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 14px; width: min(1120px, calc(100vw - 36px)); position: relative; left: 50%; transform: translateX(-50%); }
 .kc-gruppen-raster .kc-gruppe-block { min-width: 0; overflow-x: auto; }
 .kc-gruppe-block.kc-drop-aktiv { outline: 2px dashed var(--kc-green, #2e7d32); outline-offset: -2px; }
-.kc-ziehbar { cursor: grab; }
-.kc-ziehbar.kc-drop-aktiv { background: rgba(46,125,50,0.12); }
+.kc-team-ziehbar { cursor: grab; }
+.kc-team-ziehbar.kc-drop-aktiv td { background: rgba(46,125,50,0.12); }
 .kc-griff { color: var(--kc-muted); user-select: none; }
 .kc-verschieben-select { font-size: 12px; max-width: 110px; padding: 2px 4px; }
 .kc-zeitslot-kopf { font-weight: 700; font-size: 13px; margin: 14px 0 6px; padding-bottom: 4px; border-bottom: 1px solid rgba(0,0,0,0.1); }
