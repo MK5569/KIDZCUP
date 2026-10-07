@@ -3937,6 +3937,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
 
   const [zeigeFormular, setZeigeFormular] = useState(false);
   const [bearbeitetesTurnier, setBearbeitetesTurnier] = useState(null);
+  const [turnierVorlage, setTurnierVorlage] = useState(null); // Turnier, das gerade als Vorlage dupliziert wird
   const [offeneTurniere, setOffeneTurniere] = useState(() => new Set());
   const [offeneSponsoren, setOffeneSponsoren] = useState(() => new Set());
   const [zeigePasswortAendern, setZeigePasswortAendern] = useState(false);
@@ -4127,6 +4128,45 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     const roh = { id: neueId("turnier"), ...restDaten, erstelltAm: Date.now() };
     const zeile = await supabaseInsert("turniere", turnierZuDb(roh), session.access_token);
     let neuesTurnier = turnierAusDb(zeile[0]);
+    // Duplizieren: Logo und Sponsoren-Logos der Vorlage als eigene Dateikopien übernehmen, damit
+    // spätere Änderungen am einen Turnier das andere nicht beeinflussen (Anmeldungen/Spielplan nicht).
+    const dateiKopieren = async (altPfad, neuerPfad) => {
+      const antwort = await fetch(dateiOeffentlicheUrl(altPfad));
+      if (!antwort.ok) throw new Error("Originaldatei nicht lesbar");
+      await supabaseDateiHochladen(neuerPfad, await antwort.blob(), session.access_token);
+    };
+    if (turnierVorlage) {
+      if (!logoDatei && !logoEntfernen && turnierVorlage.logoPfad) {
+        try {
+          const endung = turnierVorlage.logoPfad.includes(".") ? turnierVorlage.logoPfad.slice(turnierVorlage.logoPfad.lastIndexOf(".")) : "";
+          const pfad = `logos/${roh.id}-${Date.now()}${endung}`;
+          await dateiKopieren(turnierVorlage.logoPfad, pfad);
+          const aktualisiert = await supabaseUpdate("turniere", roh.id, { logo_pfad: pfad }, session.access_token);
+          neuesTurnier = turnierAusDb(aktualisiert[0]);
+        } catch (e) {
+          alert("Turnier wurde dupliziert, aber das Logo konnte nicht kopiert werden: " + e.message);
+        }
+      }
+      const kopierteSponsoren = [];
+      let sponsorFehler = 0;
+      for (const sp of turnierVorlage.sponsoren || []) {
+        try {
+          const endung = sp.logoPfad.includes(".") ? sp.logoPfad.slice(sp.logoPfad.lastIndexOf(".")) : "";
+          const pfad = `sponsoren/${roh.id}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}${endung}`;
+          await dateiKopieren(sp.logoPfad, pfad);
+          const sz = await supabaseInsert(
+            "turnier_sponsoren",
+            { turnier_id: roh.id, logo_pfad: pfad, name: sp.name || null, reihenfolge: kopierteSponsoren.length },
+            session.access_token
+          );
+          kopierteSponsoren.push(sponsorAusDb(sz[0]));
+        } catch {
+          sponsorFehler++;
+        }
+      }
+      if (sponsorFehler > 0) alert(`Turnier wurde dupliziert, aber ${sponsorFehler} Sponsoren-Logo(s) konnten nicht kopiert werden. Bitte beim Turnier unter "Sponsoren" erneut hochladen.`);
+      neuesTurnier = { ...neuesTurnier, sponsoren: kopierteSponsoren };
+    }
     if (logoDatei) {
       try {
         const endung = logoDatei.name.includes(".") ? logoDatei.name.slice(logoDatei.name.lastIndexOf(".")) : "";
@@ -4139,6 +4179,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
       }
     }
     setTurniere((prev) => [...prev, neuesTurnier]);
+    setTurnierVorlage(null);
     setZeigeFormular(false);
   };
 
@@ -4817,6 +4858,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
               className="kc-btn kc-btn--primary"
               onClick={() => {
                 setBearbeitetesTurnier(null);
+                setTurnierVorlage(null);
                 setZeigeFormular((v) => !v);
               }}
             >
@@ -4889,9 +4931,11 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
 
       {zeigeFormular && (
         <TurnierFormular
+          key={bearbeitetesTurnier ? "bearbeiten-" + bearbeitetesTurnier.id : turnierVorlage ? "kopie-" + turnierVorlage.id : "neu"}
           bestehendesTurnier={bearbeitetesTurnier}
+          vorlage={turnierVorlage}
           onAbsenden={bearbeitetesTurnier ? turnierAktualisieren : neuesTurnierAnlegen}
-          onAbbrechen={() => { setZeigeFormular(false); setBearbeitetesTurnier(null); }}
+          onAbbrechen={() => { setZeigeFormular(false); setBearbeitetesTurnier(null); setTurnierVorlage(null); }}
         />
       )}
 
@@ -5018,9 +5062,21 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                 </button>
                 <button
                   className="kc-btn kc-btn--sekundaer"
-                  onClick={() => { setBearbeitetesTurnier(t); setZeigeFormular(true); }}
+                  onClick={() => { setTurnierVorlage(null); setBearbeitetesTurnier(t); setZeigeFormular(true); }}
                 >
                   Bearbeiten
+                </button>
+                <button
+                  className="kc-btn kc-btn--sekundaer"
+                  title="Legt eine Kopie dieses Turniers als Entwurf an - z. B. für eine andere Jugend"
+                  onClick={() => {
+                    setBearbeitetesTurnier(null);
+                    setTurnierVorlage(t);
+                    setZeigeFormular(true);
+                    window.scrollTo({ top: 0, behavior: "smooth" });
+                  }}
+                >
+                  Duplizieren
                 </button>
                 <button
                   className="kc-btn kc-btn--sekundaer"
@@ -6201,7 +6257,7 @@ function EinnahmenUebersicht({ turniere, anmeldungen, onSchliessen }) {
   );
 }
 
-function TurnierFormular({ bestehendesTurnier, onAbsenden, onAbbrechen }) {
+function TurnierFormular({ bestehendesTurnier, vorlage, onAbsenden, onAbbrechen }) {
   const [form, setForm] = useState(() =>
     bestehendesTurnier
       ? {
@@ -6217,6 +6273,22 @@ function TurnierFormular({ bestehendesTurnier, onAbsenden, onAbbrechen }) {
           kontoinhaber: bestehendesTurnier.kontoinhaber || STANDARD_KONTOINHABER,
           veroeffentlicht: bestehendesTurnier.veroeffentlicht !== false,
         }
+      : vorlage
+      ? {
+          // Kopie eines bestehenden Turniers: alle Angaben übernehmen, Datum bewusst leer lassen
+          // (muss neu gewählt werden) und als Entwurf starten.
+          name: `${vorlage.name} (Kopie)`,
+          datum: "",
+          uhrzeit: vorlage.uhrzeit || "",
+          ort: vorlage.ort,
+          maxPlaetze: String(vorlage.maxPlaetze),
+          preis: String(vorlage.preis),
+          zahlLink: vorlage.zahlLink || "",
+          beschreibung: vorlage.beschreibung || "",
+          iban: vorlage.iban || STANDARD_IBAN,
+          kontoinhaber: vorlage.kontoinhaber || STANDARD_KONTOINHABER,
+          veroeffentlicht: false,
+        }
       : {
           name: "", datum: "", uhrzeit: "", ort: "", maxPlaetze: "16", preis: "25", zahlLink: "", beschreibung: "",
           iban: STANDARD_IBAN, kontoinhaber: STANDARD_KONTOINHABER,
@@ -6227,7 +6299,7 @@ function TurnierFormular({ bestehendesTurnier, onAbsenden, onAbbrechen }) {
   const [logoDatei, setLogoDatei] = useState(null);
   const [logoVorschau, setLogoVorschau] = useState(null);
   const [logoEntfernen, setLogoEntfernen] = useState(false);
-  const [zielgruppen, setZielgruppen] = useState(bestehendesTurnier?.zielgruppen || []);
+  const [zielgruppen, setZielgruppen] = useState(bestehendesTurnier?.zielgruppen || vorlage?.zielgruppen || []);
   const feld = (name) => (e) => setForm({ ...form, [name]: e.target.value });
   const gueltig = form.name.trim() && form.datum && form.ort.trim() && Number(form.maxPlaetze) > 0 && Number(form.preis) >= 0;
 
@@ -6245,7 +6317,13 @@ function TurnierFormular({ bestehendesTurnier, onAbsenden, onAbbrechen }) {
 
   return (
     <div className="kc-section kc-formular-karte">
-      <h2 className="kc-h2">{bestehendesTurnier ? `Turnier bearbeiten: ${bestehendesTurnier.name}` : "Neues Turnier anlegen"}</h2>
+      <h2 className="kc-h2">{bestehendesTurnier ? `Turnier bearbeiten: ${bestehendesTurnier.name}` : vorlage ? `Turnier duplizieren: ${vorlage.name}` : "Neues Turnier anlegen"}</h2>
+      {vorlage && !bestehendesTurnier && (
+        <p className="kc-notiz">
+          Alle Angaben wurden aus dem bestehenden Turnier übernommen (inklusive Logo und Sponsoren). Bitte jetzt Name, Datum und Jugend anpassen.
+          Anmeldungen und Spielplan werden nicht kopiert. Die Kopie startet als Entwurf.
+        </p>
+      )}
       <form
         className="kc-formular"
         onSubmit={(e) => {
@@ -6335,10 +6413,10 @@ function TurnierFormular({ bestehendesTurnier, onAbsenden, onAbbrechen }) {
         </label>
         <label className="kc-feld">
           <span>Logo (optional, für Vereine bei der Anmeldung sichtbar)</span>
-          {(logoVorschau || (bestehendesTurnier?.logoPfad && !logoEntfernen)) && (
+          {(logoVorschau || ((bestehendesTurnier || vorlage)?.logoPfad && !logoEntfernen)) && (
             <div className="kc-logo-vorschau">
               <img
-                src={logoVorschau || dateiOeffentlicheUrl(bestehendesTurnier.logoPfad)}
+                src={logoVorschau || dateiOeffentlicheUrl((bestehendesTurnier || vorlage).logoPfad)}
                 alt="Logo-Vorschau"
               />
               <button
@@ -6354,7 +6432,7 @@ function TurnierFormular({ bestehendesTurnier, onAbsenden, onAbbrechen }) {
         </label>
         <div className="kc-admin-aktionen">
           <button className="kc-btn kc-btn--primary" type="submit" disabled={!gueltig}>
-            {bestehendesTurnier ? "Änderungen speichern" : "Turnier speichern"}
+            {bestehendesTurnier ? "Änderungen speichern" : vorlage ? "Kopie speichern" : "Turnier speichern"}
           </button>
           {onAbbrechen && (
             <button className="kc-btn kc-btn--sekundaer" type="button" onClick={onAbbrechen}>Abbrechen</button>
