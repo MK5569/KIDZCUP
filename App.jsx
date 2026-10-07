@@ -1712,7 +1712,9 @@ async function supabaseDateiHochladen(pfad, datei, accessToken) {
 async function supabaseDateiLoeschen(pfad, accessToken) {
   const res = await fetch(`${SUPABASE_URL}/storage/v1/object/${DOKUMENTE_BUCKET}/${pfad}`, {
     method: "DELETE",
-    headers: supabaseHeaders(accessToken),
+    // Storage lehnt DELETE mit "Content-Type: application/json" ohne Body ab ("Body cannot be empty ...") -
+    // deshalb hier bewusst ohne diesen Header senden.
+    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken || SUPABASE_ANON_KEY}` },
   });
   if (!res.ok) throw new Error(await supabaseFehlerText(res));
 }
@@ -4239,7 +4241,9 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
 
   const sponsorLoeschen = async (turnier, sponsor) => {
     try {
-      await supabaseDateiLoeschen(sponsor.logoPfad, session.access_token);
+      // Fehlt die Datei im Speicher oder lässt sie sich nicht löschen, soll der Eintrag trotzdem verschwinden
+      // (sonst bliebe ein "Geister-Logo" hängen); eine übrig gebliebene Datei ist harmlos.
+      try { await supabaseDateiLoeschen(sponsor.logoPfad, session.access_token); } catch { /* ignorieren */ }
       await supabaseDelete("turnier_sponsoren", sponsor.id, session.access_token);
       setTurniere((prev) => prev.map((t) => (t.id === turnier.id ? { ...t, sponsoren: (t.sponsoren || []).filter((s) => s.id !== sponsor.id) } : t)));
     } catch (e) {
