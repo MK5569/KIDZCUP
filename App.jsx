@@ -1992,6 +1992,7 @@ function turnierAusDb(t) {
     kontoinhaber: t.kontoinhaber || "",
     zielgruppen: t.zielgruppen || [],
     veroeffentlicht: t.veroeffentlicht !== false,
+    ausrichter: t.ausrichter || "",
   };
 }
 function turnierZuDb(t) {
@@ -2001,7 +2002,29 @@ function turnierZuDb(t) {
     iban: t.iban || null, kontoinhaber: t.kontoinhaber || null,
     zielgruppen: t.zielgruppen || [],
     veroeffentlicht: t.veroeffentlicht !== false,
+    // Ausrichter wird nur mitgeschickt, wenn er gesetzt ist (oder bewusst geleert wird) - so läuft die App auch,
+    // solange die Spalte "ausrichter" in der Datenbank noch nicht angelegt wurde.
+    ...(t.ausrichter && t.ausrichter.trim() ? { ausrichter: t.ausrichter.trim() } : t.ausrichterLoeschen ? { ausrichter: null } : {}),
   };
+}
+
+// Ausrichter/Standort eines Turniers: der eingetragene Ausrichter, sonst der Ort. Danach wird für Teilnehmer gruppiert.
+function ausrichterName(t) {
+  return ((t.ausrichter || "").trim() || (t.ort || "").trim() || "Weitere Turniere");
+}
+function gruppiereNachAusrichter(liste) {
+  const karte = new Map();
+  liste.forEach((t) => {
+    const name = ausrichterName(t);
+    const schluessel = name.toLowerCase();
+    if (!karte.has(schluessel)) karte.set(schluessel, { schluessel, name, turniere: [], logoPfad: null });
+    const g = karte.get(schluessel);
+    g.turniere.push(t);
+    if (!g.logoPfad && t.logoPfad) g.logoPfad = t.logoPfad;
+  });
+  return [...karte.values()]
+    .map((g) => ({ ...g, naechstes: g.turniere.reduce((m, t) => (m === null || new Date(t.datum) < new Date(m) ? t.datum : m), null) }))
+    .sort((a, b) => new Date(a.naechstes) - new Date(b.naechstes) || a.name.localeCompare(b.name, "de"));
 }
 
 function anmeldungAusDb(a) {
@@ -2295,21 +2318,31 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
 
   const [monatFilter, setMonatFilter] = useState("");
   const [jugendFilter, setJugendFilter] = useState("");
+  const [ausrichterWahl, setAusrichterWahl] = useState(null); // Schlüssel des gewählten Ausrichters (null = Übersicht)
+
+  // Turniere nach Ausrichter/Standort gruppieren. Gibt es nur einen Ausrichter, entfällt die Auswahl-Übersicht.
+  const ausrichterGruppen = useMemo(() => gruppiereNachAusrichter(kommendeTurniere), [kommendeTurniere]);
+  const ausrichterAuswahlAktiv = ausrichterGruppen.length > 1;
+  const aktiverAusrichter = ausrichterAuswahlAktiv ? ausrichterGruppen.find((g) => g.schluessel === ausrichterWahl) || null : null;
+  const turniereImAusrichter = useMemo(
+    () => (aktiverAusrichter ? kommendeTurniere.filter((t) => ausrichterName(t).toLowerCase() === aktiverAusrichter.schluessel) : kommendeTurniere),
+    [kommendeTurniere, aktiverAusrichter]
+  );
 
   // Welche Monate überhaupt vorkommen, damit der Filter nur relevante Monate anbietet.
   const verfuegbareMonate = useMemo(() => {
-    const monate = new Set(kommendeTurniere.map((t) => new Date(t.datum).getMonth()));
+    const monate = new Set(turniereImAusrichter.map((t) => new Date(t.datum).getMonth()));
     return Array.from(monate).sort((a, b) => a - b);
-  }, [kommendeTurniere]);
+  }, [turniereImAusrichter]);
 
   const turniereGefiltert = useMemo(() => {
-    return kommendeTurniere.filter((t) => {
+    return turniereImAusrichter.filter((t) => {
       if (monatFilter !== "" && new Date(t.datum).getMonth() !== Number(monatFilter)) return false;
       // Turniere ohne hinterlegte Zielgruppe gelten als "für alle Jugenden" und werden nie ausgeblendet.
       if (jugendFilter !== "" && t.zielgruppen && t.zielgruppen.length > 0 && !t.zielgruppen.includes(jugendFilter)) return false;
       return true;
     });
-  }, [kommendeTurniere, monatFilter, jugendFilter]);
+  }, [turniereImAusrichter, monatFilter, jugendFilter]);
 
   const pruefeDuplikat = async (turnierId, verein, jugend) => {
     try {
@@ -2563,11 +2596,41 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
   return (
     <div>
       <section className="kc-section">
-        <h1 className="kc-h1">Turnier auswählen</h1>
-        <p className="kc-sub">Freie Plätze, Termin und Ort auf einen Blick – Anmeldegebühr wird per Link bezahlt.</p>
+        {ausrichterAuswahlAktiv && aktiverAusrichter && (
+          <button className="kc-zurueck" onClick={() => { setAusrichterWahl(null); setMonatFilter(""); setJugendFilter(""); }}>← Alle Ausrichter</button>
+        )}
+        <h1 className="kc-h1">{aktiverAusrichter ? aktiverAusrichter.name : ausrichterAuswahlAktiv ? "Ausrichter auswählen" : "Turnier auswählen"}</h1>
+        <p className="kc-sub">
+          {ausrichterAuswahlAktiv && !aktiverAusrichter
+            ? "Wähle den Verein oder Standort, bei dem das Turnier stattfindet – danach siehst du alle Turniere dort."
+            : "Freie Plätze, Termin und Ort auf einen Blick – Anmeldegebühr wird per Link bezahlt."}
+        </p>
       </section>
 
-      {kommendeTurniere.length > 0 && (
+      {ausrichterAuswahlAktiv && !aktiverAusrichter && (
+        <div className="kc-ausrichter-raster">
+          {ausrichterGruppen.map((g) => {
+            const frei = g.turniere.reduce((summe, t) => summe + Math.max(0, t.maxPlaetze - belegtePlaetze(t.id)), 0);
+            return (
+              <button type="button" key={g.schluessel} className="kc-ausrichter-kachel" onClick={() => { setAusrichterWahl(g.schluessel); setMonatFilter(""); setJugendFilter(""); }}>
+                {g.logoPfad ? (
+                  <img className="kc-ausrichter-kachel__logo" src={dateiOeffentlicheUrl(g.logoPfad)} alt="" />
+                ) : (
+                  <span className="kc-ausrichter-kachel__logo kc-ausrichter-kachel__logo--buchstabe" aria-hidden="true">{g.name.charAt(0).toUpperCase()}</span>
+                )}
+                <span className="kc-ausrichter-kachel__text">
+                  <strong>{g.name}</strong>
+                  <span>{g.turniere.length} Turnier{g.turniere.length !== 1 ? "e" : ""} · nächstes am {formatDatum(g.naechstes)}</span>
+                  <span>{frei > 0 ? `${frei} Plätze frei` : "aktuell ausgebucht – Warteliste möglich"}</span>
+                </span>
+                <span className="kc-ausrichter-kachel__pfeil" aria-hidden="true">›</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {(!ausrichterAuswahlAktiv || aktiverAusrichter) && kommendeTurniere.length > 0 && (
         <section className="kc-section kc-filter-leiste">
           <label className="kc-feld">
             <span>Monat</span>
@@ -2599,12 +2662,12 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
         <div className="kc-empty">Aktuell sind keine Turniere ausgeschrieben. Schau bald wieder vorbei.</div>
       )}
 
-      {kommendeTurniere.length > 0 && turniereGefiltert.length === 0 && (
+      {(!ausrichterAuswahlAktiv || aktiverAusrichter) && kommendeTurniere.length > 0 && turniereGefiltert.length === 0 && (
         <div className="kc-empty">Kein Turnier passt zu den gewählten Filtern.</div>
       )}
 
       <div className="kc-liste">
-        {turniereGefiltert.map((t) => {
+        {(!ausrichterAuswahlAktiv || aktiverAusrichter) && turniereGefiltert.map((t) => {
           const belegt = belegtePlaetze(t.id);
           const frei = Math.max(0, t.maxPlaetze - belegt);
           return (
@@ -4463,7 +4526,16 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
   const neuesTurnierAnlegen = async (daten) => {
     const { logoDatei, logoEntfernen, ...restDaten } = daten;
     const roh = { id: neueId("turnier"), ...restDaten, erstelltAm: Date.now() };
-    const zeile = await supabaseInsert("turniere", turnierZuDb(roh), session.access_token);
+    let zeile;
+    try {
+      zeile = await supabaseInsert("turniere", turnierZuDb(roh), session.access_token);
+    } catch (e) {
+      if (/ausrichter/i.test(e.message || "")) {
+        alert('Der Ausrichter kann noch nicht gespeichert werden, weil die Datenbank-Spalte fehlt. Bitte einmal in Supabase den SQL-Befehl ausführen:\n\nALTER TABLE turniere ADD COLUMN IF NOT EXISTS ausrichter text;\n\nAlternativ das Feld "Ausrichter" leer lassen.');
+        return;
+      }
+      throw e;
+    }
     let neuesTurnier = turnierAusDb(zeile[0]);
     // Duplizieren: Logo und Sponsoren-Logos der Vorlage als eigene Dateikopien übernehmen, damit
     // spätere Änderungen am einen Turnier das andere nicht beeinflussen (Anmeldungen/Spielplan nicht).
@@ -4538,7 +4610,20 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     } catch (e) {
       alert("Hinweis: Logo-Änderung konnte nicht vollständig gespeichert werden: " + e.message);
     }
-    const zeile = await supabaseUpdate("turniere", id, turnierZuDb({ id, ...restDaten, logoPfad }), session.access_token);
+    let zeile;
+    try {
+      zeile = await supabaseUpdate(
+        "turniere", id,
+        turnierZuDb({ id, ...restDaten, logoPfad, ausrichterLoeschen: !!bearbeitetesTurnier.ausrichter && !(restDaten.ausrichter || "").trim() }),
+        session.access_token
+      );
+    } catch (e) {
+      if (/ausrichter/i.test(e.message || "")) {
+        alert('Der Ausrichter kann noch nicht gespeichert werden, weil die Datenbank-Spalte fehlt. Bitte einmal in Supabase den SQL-Befehl ausführen:\n\nALTER TABLE turniere ADD COLUMN IF NOT EXISTS ausrichter text;\n\nAlternativ das Feld "Ausrichter" leer lassen.');
+        return;
+      }
+      throw e;
+    }
     setTurniere((prev) => prev.map((t) => (t.id === id ? { ...turnierAusDb(zeile[0]), sponsoren: t.sponsoren } : t)));
     setBearbeitetesTurnier(null);
     setZeigeFormular(false);
@@ -5283,6 +5368,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
           key={bearbeitetesTurnier ? "bearbeiten-" + bearbeitetesTurnier.id : turnierVorlage ? "kopie-" + turnierVorlage.id : "neu"}
           bestehendesTurnier={bearbeitetesTurnier}
           vorlage={turnierVorlage}
+          ausrichterVorschlaege={Array.from(new Map(turniere.map((x) => (x.ausrichter || "").trim()).filter(Boolean).map((a) => [a.toLowerCase(), a])).values()).sort((a, b) => a.localeCompare(b, "de"))}
           onAbsenden={bearbeitetesTurnier ? turnierAktualisieren : neuesTurnierAnlegen}
           onAbbrechen={() => { setZeigeFormular(false); setBearbeitetesTurnier(null); setTurnierVorlage(null); }}
         />
@@ -5428,6 +5514,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
               )}
               <dl className="kc-details">
                 <div><dt>Termin</dt><dd>{formatDatum(t.datum)}</dd></div>
+                {t.ausrichter && <div><dt>Ausrichter</dt><dd>{t.ausrichter}</dd></div>}
                 <div><dt>Ort</dt><dd><a className="kc-ort-link" href={mapsLink(t.ort)} target="_blank" rel="noopener">📍 {t.ort}</a></dd></div>
                 <div><dt>Gebühr</dt><dd>{t.preis} €</dd></div>
                 <div><dt>Zahlungslink</dt><dd className="kc-link-truncate">{t.zahlLink || "– nicht hinterlegt –"}</dd></div>
@@ -6888,7 +6975,7 @@ function EinnahmenUebersicht({ turniere, anmeldungen, onSchliessen }) {
   );
 }
 
-function TurnierFormular({ bestehendesTurnier, vorlage, onAbsenden, onAbbrechen }) {
+function TurnierFormular({ bestehendesTurnier, vorlage, ausrichterVorschlaege = [], onAbsenden, onAbbrechen }) {
   const [form, setForm] = useState(() =>
     bestehendesTurnier
       ? {
@@ -6896,6 +6983,7 @@ function TurnierFormular({ bestehendesTurnier, vorlage, onAbsenden, onAbbrechen 
           datum: bestehendesTurnier.datum,
           uhrzeit: bestehendesTurnier.uhrzeit || "",
           ort: bestehendesTurnier.ort,
+          ausrichter: bestehendesTurnier.ausrichter || "",
           maxPlaetze: String(bestehendesTurnier.maxPlaetze),
           preis: String(bestehendesTurnier.preis),
           zahlLink: bestehendesTurnier.zahlLink || "",
@@ -6912,6 +7000,7 @@ function TurnierFormular({ bestehendesTurnier, vorlage, onAbsenden, onAbbrechen 
           datum: "",
           uhrzeit: vorlage.uhrzeit || "",
           ort: vorlage.ort,
+          ausrichter: vorlage.ausrichter || "",
           maxPlaetze: String(vorlage.maxPlaetze),
           preis: String(vorlage.preis),
           zahlLink: vorlage.zahlLink || "",
@@ -6921,7 +7010,7 @@ function TurnierFormular({ bestehendesTurnier, vorlage, onAbsenden, onAbbrechen 
           veroeffentlicht: false,
         }
       : {
-          name: "", datum: "", uhrzeit: "", ort: "", maxPlaetze: "16", preis: "25", zahlLink: "", beschreibung: "",
+          name: "", datum: "", uhrzeit: "", ort: "", ausrichter: "", maxPlaetze: "16", preis: "25", zahlLink: "", beschreibung: "",
           iban: STANDARD_IBAN, kontoinhaber: STANDARD_KONTOINHABER,
           // Neue Turniere starten standardmäßig als Entwurf - erst per Häkchen für Vereine sichtbar machen.
           veroeffentlicht: false,
@@ -6988,6 +7077,21 @@ function TurnierFormular({ bestehendesTurnier, vorlage, onAbsenden, onAbbrechen 
             <input className="kc-input" type="time" value={form.uhrzeit} onChange={feld("uhrzeit")} />
           </label>
         </div>
+        <label className="kc-feld">
+          <span>Ausrichter / Verein (optional)</span>
+          <input
+            className="kc-input"
+            list="kc-ausrichter-liste"
+            value={form.ausrichter}
+            onChange={feld("ausrichter")}
+            placeholder="z. B. Hombrucher SV"
+            maxLength={80}
+          />
+          <datalist id="kc-ausrichter-liste">
+            {ausrichterVorschlaege.map((a) => <option key={a} value={a} />)}
+          </datalist>
+          <span className="kc-notiz">Vereine wählen zuerst den Ausrichter und sehen dann alle Turniere dort. Gleiche Schreibweise = gleiche Gruppe. Leer = Gruppierung nach Ort.</span>
+        </label>
         <label className="kc-feld">
           <span>Ort</span>
           <input className="kc-input" value={form.ort} onChange={feld("ort")} required />
@@ -7391,6 +7495,15 @@ const CSS = `
 .kc-schritte__punkt--fertig .kc-schritte__kreis { background: var(--kc-green); color: #FFFFFF; }
 .kc-schritte__punkt--aktuell .kc-schritte__kreis { background: #FFFFFF; color: var(--kc-green); box-shadow: 0 0 0 3px var(--kc-blue); }
 .kc-schritte__punkt--fertig, .kc-schritte__punkt--aktuell { color: var(--kc-pitch); }
+.kc-ausrichter-raster { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; margin-top: 4px; }
+.kc-ausrichter-kachel { display: flex; align-items: center; gap: 14px; text-align: left; width: 100%; background: var(--kc-card); border: 0; border-left: 6px solid var(--kc-blue); border-radius: 16px; padding: 16px; box-shadow: 0 1px 3px rgba(27,42,71,0.08); cursor: pointer; font: inherit; color: var(--kc-text); transition: transform 0.15s, box-shadow 0.15s; }
+.kc-ausrichter-kachel:hover, .kc-ausrichter-kachel:focus-visible { transform: translateY(-2px); box-shadow: 0 8px 22px rgba(27,42,71,0.14); outline: none; }
+.kc-ausrichter-kachel__logo { width: 52px; height: 52px; border-radius: 14px; object-fit: contain; background: #FFFFFF; border: 1px solid #E1E7EF; padding: 4px; flex-shrink: 0; }
+.kc-ausrichter-kachel__logo--buchstabe { display: inline-flex; align-items: center; justify-content: center; background: linear-gradient(135deg, var(--kc-green), var(--kc-blue)); border: 0; color: #FFFFFF; font-size: 22px; font-weight: 800; padding: 0; }
+.kc-ausrichter-kachel__text { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
+.kc-ausrichter-kachel__text strong { font-size: 17px; color: var(--kc-pitch); overflow-wrap: anywhere; }
+.kc-ausrichter-kachel__text span { font-size: 13px; color: var(--kc-muted); }
+.kc-ausrichter-kachel__pfeil { font-size: 28px; color: var(--kc-blue); line-height: 1; }
 .kc-archiv { margin-top: 18px; display: flex; flex-direction: column; gap: 16px; }
 .kc-archiv__kopf { align-self: flex-start; font-weight: 700; }
 .kc-fehler { color: var(--kc-red); font-size: 13.5px; margin-top: 8px; }
