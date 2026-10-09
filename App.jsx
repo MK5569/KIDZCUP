@@ -3438,6 +3438,7 @@ function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
   const [anzahlRunden, setAnzahlRunden] = useState(5);
   const [startzeit, setStartzeit] = useState(turnier?.uhrzeit || "09:00");
   const [spieldauerMin, setSpieldauerMin] = useState(20);
+  const [wechselzeitMin, setWechselzeitMin] = useState(0); // Pause zwischen zwei Spielen auf demselben Feld (Mannschaftswechsel)
   const [anzahlFelder, setAnzahlFelder] = useState(1);
   const anzahlTeams = bestaetigteTeams.length;
   const zuWenigTeams = anzahlTeams < 2;
@@ -3594,7 +3595,15 @@ function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
               <span>Spieldauer je Spiel (Minuten)</span>
               <input className="kc-input" type="number" min="5" step="5" value={spieldauerMin} onChange={(e) => setSpieldauerMin(Number(e.target.value))} />
             </label>
+            <label className="kc-feld">
+              <span>Wechselzeit (Minuten)</span>
+              <input className="kc-input" type="number" min="0" step="1" value={wechselzeitMin} onChange={(e) => setWechselzeitMin(Math.max(0, Number(e.target.value) || 0))} />
+            </label>
           </div>
+          <p className="kc-notiz">
+            Wechselzeit = Pause zwischen zwei Spielen auf demselben Feld, damit die Mannschaften wechseln können.
+            {wechselzeitMin > 0 ? ` Ein Spiel beginnt dann alle ${spieldauerMin + wechselzeitMin} Minuten (${spieldauerMin} Min. Spielzeit + ${wechselzeitMin} Min. Wechsel).` : ""}
+          </p>
           <label className="kc-feld">
             <span>Anzahl Felder/Plätze</span>
             <input className="kc-input" type="number" min="1" max="10" value={anzahlFelder} onChange={(e) => setAnzahlFelder(Number(e.target.value))} />
@@ -3612,7 +3621,7 @@ function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
               onErstellen(
                 effektiverModus,
                 modus === "liga" ? 1 : (modus === "gruppen" || modus === "gruppen_hf" || effektiverModus === "gruppen_ko" ? anzahlGruppen : null),
-                { startzeit, spieldauerMin, anzahlFelder },
+                { startzeit, spieldauerMin: spieldauerMin + wechselzeitMin, anzahlFelder },
                 {
                   mitRueckrunde,
                   halbfinaleFix: modus === "gruppen_hf",
@@ -3638,6 +3647,7 @@ function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
 function EndrundeStarten({ onEndrundeStarten, turnier, halbfinale }) {
   const [startzeit, setStartzeit] = useState(turnier?.uhrzeit || "13:00");
   const [spieldauerMin, setSpieldauerMin] = useState(20);
+  const [wechselzeitMin, setWechselzeitMin] = useState(0); // Pause zwischen zwei Spielen auf demselben Feld (Mannschaftswechsel)
   const [anzahlFelder, setAnzahlFelder] = useState(1);
 
   return (
@@ -3657,12 +3667,16 @@ function EndrundeStarten({ onEndrundeStarten, turnier, halbfinale }) {
             <span>Spieldauer je Spiel (Minuten)</span>
             <input className="kc-input" type="number" min="5" step="5" value={spieldauerMin} onChange={(e) => setSpieldauerMin(Number(e.target.value))} />
           </label>
+          <label className="kc-feld">
+            <span>Wechselzeit (Minuten)</span>
+            <input className="kc-input" type="number" min="0" step="1" value={wechselzeitMin} onChange={(e) => setWechselzeitMin(Math.max(0, Number(e.target.value) || 0))} />
+          </label>
         </div>
         <label className="kc-feld">
           <span>Anzahl Felder/Plätze</span>
           <input className="kc-input" type="number" min="1" max="10" value={anzahlFelder} onChange={(e) => setAnzahlFelder(Number(e.target.value))} />
         </label>
-        <button className="kc-btn kc-btn--primary" onClick={() => onEndrundeStarten({ startzeit, spieldauerMin, anzahlFelder })}>
+        <button className="kc-btn kc-btn--primary" onClick={() => onEndrundeStarten({ startzeit, spieldauerMin: spieldauerMin + wechselzeitMin, anzahlFelder })}>
           Endrunde jetzt auslosen &amp; starten
         </button>
       </div>
