@@ -1772,6 +1772,17 @@ function sitzungGeladen() {
     return null;
   }
 }
+// Liest den Ablaufzeitpunkt (Unix-ms) aus dem Access-Token (JWT); null, falls nicht lesbar.
+function jwtAblaufMs(token) {
+  try {
+    const teil = String(token).split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    const daten = JSON.parse(atob(teil + "=".repeat((4 - (teil.length % 4)) % 4)));
+    return daten.exp ? daten.exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
 function sitzungLoeschen() {
   try { window.localStorage.removeItem(SESSION_SPEICHER_SCHLUESSEL); } catch {}
 }
@@ -4010,6 +4021,41 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Hält die Admin-Sitzung am Leben: Der Zugangstoken läuft nach ca. 1 Stunde ab ("JWT expired").
+  // Deshalb wird er automatisch erneuert, sobald er in weniger als 5 Minuten abläuft - per Timer
+  // und zusätzlich, wenn man zur Seite zurückkehrt (Handy/Laptop im Ruhezustand pausieren Timer).
+  // Ist auch die Erneuerung nicht mehr möglich, geht es zurück zum Login statt zu kryptischen Fehlern.
+  useEffect(() => {
+    if (!session) return undefined;
+    let aktiv = true;
+    const pruefen = async () => {
+      const ablauf = jwtAblaufMs(session.access_token);
+      if (ablauf && ablauf - Date.now() > 5 * 60 * 1000) return;
+      try {
+        const erneuert = await supabaseSitzungErneuern(session.refresh_token);
+        if (!aktiv) return;
+        sitzungSpeichern(erneuert);
+        setSession(erneuert);
+      } catch {
+        if (aktiv && ablauf && ablauf < Date.now()) {
+          sitzungLoeschen();
+          setSession(null);
+        }
+      }
+    };
+    pruefen();
+    const timer = setInterval(pruefen, 60 * 1000);
+    const beiRueckkehr = () => { if (document.visibilityState !== "hidden") pruefen(); };
+    document.addEventListener("visibilitychange", beiRueckkehr);
+    window.addEventListener("focus", pruefen);
+    return () => {
+      aktiv = false;
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", beiRueckkehr);
+      window.removeEventListener("focus", pruefen);
+    };
+  }, [session]);
+
   // Automatik: Anmeldungen mit Status "ausstehend", deren Zahlungsfrist überschritten ist, werden
   // beim Laden automatisch auf die Warteliste gesetzt - blockieren dann keinen Platz mehr, ohne
   // dass ihr das von Hand nachpflegen müsst. Bewusst NUR "ausstehend", nicht "zahlung_gemeldet":
@@ -4081,8 +4127,10 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
         console.warn("WhatsApp-Gruppen konnten nicht geladen werden:", e.message);
       }
     })();
+    // Bewusst nicht von "session" selbst abhängig: Bei der automatischen Token-Erneuerung soll nicht neu
+    // geladen werden (sonst würde die Ansicht kurz auf "Lädt ..." springen und offene Formulare verwerfen).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session, adminProfil]);
+  }, [!!session, session && session.user && session.user.id, adminProfil]);
 
   if (sitzungWirdGeprueft) {
     return <div className="kc-section">Lädt …</div>;
