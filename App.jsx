@@ -2301,7 +2301,15 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
     if (!angezeigteMannschaftenFuer) { setMannschaftenListe([]); return; }
     (async () => {
       try {
-        const teams = await supabaseRpc("oeffentliche_angemeldete_teams", { p_turnier_id: angezeigteMannschaftenFuer.id });
+        // Nur bestätigte Mannschaften anzeigen. Bevorzugt die neue Datenbank-Funktion; solange sie noch nicht angelegt ist,
+        // greift die bisherige Funktion - dann wird zusätzlich nach Status gefiltert, falls dieser mitgeliefert wird.
+        let teams;
+        try {
+          teams = await supabaseRpc("oeffentliche_bestaetigte_teams", { p_turnier_id: angezeigteMannschaftenFuer.id });
+        } catch {
+          const alle = await supabaseRpc("oeffentliche_angemeldete_teams", { p_turnier_id: angezeigteMannschaftenFuer.id });
+          teams = (alle || []).filter((x) => x.status === undefined || x.status === "bestaetigt");
+        }
         setMannschaftenListe(teams || []);
       } catch {
         setMannschaftenListe([]);
@@ -2574,9 +2582,9 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
     return (
       <div className="kc-section">
         <button className="kc-zurueck" onClick={() => setAngezeigteMannschaftenFuer(null)}>← Zurück</button>
-        <h1 className="kc-h1">Angemeldete Mannschaften: {angezeigteMannschaftenFuer.name}</h1>
+        <h1 className="kc-h1">Bestätigte Mannschaften: {angezeigteMannschaftenFuer.name}</h1>
         {mannschaftenListe.length === 0 ? (
-          <p className="kc-sub">Noch keine Mannschaft angemeldet.</p>
+          <p className="kc-sub">Noch keine Mannschaft bestätigt.</p>
         ) : (
           jugendSchluessel.map((jugend) => (
             <div key={jugend} className="kc-mannschaften-gruppe">
@@ -2704,7 +2712,7 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
               </button>
               {belegt > 0 && (
                 <button className="kc-btn kc-btn--sekundaer kc-btn--block" onClick={() => setAngezeigteMannschaftenFuer(t)}>
-                  Angemeldete Mannschaften ({belegt})
+                  Bestätigte Mannschaften ansehen
                 </button>
               )}
               {spielplaene.some((p) => p.turnierId === t.id) && (
