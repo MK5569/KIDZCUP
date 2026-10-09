@@ -2621,6 +2621,15 @@ function TeilnehmerAnsicht({ turniere, belegtePlaetze, belegungNeuLaden, spielpl
                   <span className="kc-zahl-label">Plätze frei</span>
                 </div>
               </div>
+              <div className="kc-fortschritt" role="img" aria-label={`${belegt} von ${t.maxPlaetze} Plätzen belegt`}>
+                <div
+                  className={`kc-fortschritt__fuellung${frei === 0 ? " kc-fortschritt__fuellung--voll" : ""}`}
+                  style={{ width: `${t.maxPlaetze > 0 ? Math.min(100, Math.round((belegt / t.maxPlaetze) * 100)) : 0}%` }}
+                />
+              </div>
+              <p className="kc-fortschritt__text">
+                {frei === 0 ? "Ausgebucht – Anmeldung nur noch auf die Warteliste" : `${belegt} von ${t.maxPlaetze} Plätzen belegt`}
+              </p>
               <dl className="kc-details">
                 <div><dt>Termin</dt><dd>{formatTermin(t)}</dd></div>
                 <div><dt>Ort</dt><dd><a className="kc-ort-link" href={mapsLink(t.ort)} target="_blank" rel="noopener">📍 {t.ort}</a></dd></div>
@@ -3029,6 +3038,26 @@ function AnmeldeStatusKarte({ anmeldung, turnier, jetzt, alsBezahltMelden, fotoE
             <>{formatTermin(turnier)} · <a className="kc-ort-link" href={mapsLink(turnier.ort)} target="_blank" rel="noopener">📍 {turnier.ort}</a></>
           ) : ""}
         </p>
+        {(() => {
+          // Fortschrittsanzeige der Anmeldung (nur für den regulären Ablauf; Warteliste/abgelaufen/abgelehnt haben ihre eigenen Hinweise)
+          const aktiv = { eingegangen: 1, ausstehend: 2, zahlung_gemeldet: 2, bestaetigt: 4 }[status];
+          if (aktiv === undefined) return null;
+          const schritte = ["Angemeldet", "Prüfung", "Zahlung", "Bestätigt"];
+          return (
+            <ol className="kc-schritte" aria-label="Stand der Anmeldung">
+              {schritte.map((name, i) => (
+                <li
+                  key={name}
+                  className={"kc-schritte__punkt" + (i < aktiv ? " kc-schritte__punkt--fertig" : "") + (i === aktiv ? " kc-schritte__punkt--aktuell" : "")}
+                  aria-current={i === aktiv ? "step" : undefined}
+                >
+                  <span className="kc-schritte__kreis">{i < aktiv ? "✓" : i + 1}</span>
+                  <span className="kc-schritte__name">{name}</span>
+                </li>
+              ))}
+            </ol>
+          );
+        })()}
 
         <dl className="kc-details">
           <div><dt>Verein</dt><dd>{anmeldung.verein}</dd></div>
@@ -3170,6 +3199,7 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
   const [ziehTeam, setZiehTeam] = useState(null); // Mannschaft, die gerade per Drag and Drop gezogen wird
   const [dropZiel, setDropZiel] = useState(null); // "g:<gruppenId>" (verschieben) oder "t:<teamId>" (tauschen)
   const [verschiebeHinweis, setVerschiebeHinweis] = useState("");
+  const [ansicht, setAnsicht] = useState("zeit"); // Gesamtplan der Gruppenphase: "zeit" | "gruppen" | "feld"
 
   const teamName = (id) => {
     if (!id) return "noch offen";
@@ -3189,6 +3219,13 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
     ...(plan.platz3Spiel ? [plan.platz3Spiel] : []),
   ];
   const trefferAnzahl = alleSpiele.filter(spielPasst).length;
+  // Nächstes noch nicht gespieltes Spiel (Gruppenspiele nach Uhrzeit, danach die K.o.-Runden) - dorthin springt der Button "Nächstes Spiel".
+  const naechstesSpiel = [
+    ...(plan.spiele ? gruppenSpieleChronologisch(plan) : []),
+    ...(plan.runden ? plan.runden.flat() : []),
+    ...(plan.platz3Spiel ? [plan.platz3Spiel] : []),
+  ].find((x) => !x.freilos && x.heimId && x.gastId && (x.heimTore === null || x.gastTore === null));
+  const naechstesId = naechstesSpiel ? naechstesSpiel.id : null;
   const gruppenNameVon = {};
   (plan.gruppen || []).forEach((g) => { gruppenNameVon[g.id] = g.name; });
 
@@ -3339,6 +3376,39 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
   // Spielnummer, Uhrzeit, Feld und Gruppe. Bei gleicher Uhrzeit steht über den Spielen eine Zeit-Überschrift.
   const spieleChrono = plan.spiele ? gruppenSpieleChronologisch(plan) : [];
   const sichtbareChrono = spieleChrono.filter(spielPasst);
+  // Gruppierung für die Ansichten "Nach Gruppen" / "Nach Feld" (innerhalb jeder Gruppe bleibt die Zeitreihenfolge)
+  const ansichtGruppierung = (() => {
+    const karte = new Map();
+    sichtbareChrono.forEach((x) => {
+      let schluessel, titel, sortierung;
+      if (ansicht === "feld") {
+        schluessel = x.feld ? "f" + x.feld : "f-";
+        titel = x.feld ? `🟩 Feld ${x.feld}` : "Ohne Feld";
+        sortierung = x.feld ? Number(x.feld) : 9999;
+      } else {
+        schluessel = "g" + (x.gruppeId ?? "");
+        titel = `👥 ${gruppenNameVon[x.gruppeId] || "Spiele"}`;
+        sortierung = (plan.gruppen || []).findIndex((g) => g.id === x.gruppeId);
+        if (sortierung < 0) sortierung = 9999;
+      }
+      if (!karte.has(schluessel)) karte.set(schluessel, { schluessel, titel, sortierung, spiele: [] });
+      karte.get(schluessel).spiele.push(x);
+    });
+    return [...karte.values()].sort((a, b) => a.sortierung - b.sortierung);
+  })();
+  const spielZeileFuer = (x) => (
+    <SpielZeile
+      spiel={x}
+      teamName={teamName}
+      bearbeitbar={bearbeitbar}
+      onSpeichern={onSpielSpeichern}
+      onZeitSpeichern={onZeitSpeichern}
+      nummer={nummern[x.id]}
+      gruppenName={gruppenNameVon[x.gruppeId]}
+      hervorheben={filterBegriff}
+      istNaechstes={naechstesId === x.id}
+    />
+  );
   const gesamtplanBlock = plan.spiele ? (
     <div className="kc-runde-block kc-gesamtplan">
       <h3 className="kc-h3">{plan.modus === "gruppen_ko" ? "Spielplan Gruppenphase" : "Spielplan"}</h3>
@@ -3347,29 +3417,44 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
           {filterBegriff !== "" ? `Keine Spiele für ${vereinsFilter.trim()} gefunden.` : "Noch keine Spiele vorhanden."}
         </p>
       ) : (
-        <div className="kc-spiele-liste">
-          {sichtbareChrono.map((s, i) => {
-            const vorher = sichtbareChrono[i - 1];
-            const neuerSlot = !vorher || (vorher.uhrzeit || "") !== (s.uhrzeit || "");
-            return (
-              <React.Fragment key={s.id}>
-                {neuerSlot && (
-                  <div className="kc-zeitslot-kopf">{s.uhrzeit ? `🕐 ${s.uhrzeit} Uhr` : "Uhrzeit noch offen"}</div>
-                )}
-                <SpielZeile
-                  spiel={s}
-                  teamName={teamName}
-                  bearbeitbar={bearbeitbar}
-                  onSpeichern={onSpielSpeichern}
-                  onZeitSpeichern={onZeitSpeichern}
-                  nummer={nummern[s.id]}
-                  gruppenName={gruppenNameVon[s.gruppeId]}
-                  hervorheben={filterBegriff}
-                />
+        <>
+          <div className="kc-ansicht-schalter" role="tablist" aria-label="Ansicht des Spielplans">
+            {[["zeit", "🕐 Nach Zeit"], ["gruppen", "👥 Nach Gruppen"], ["feld", "🟩 Nach Feld"]].map(([wert, label]) => (
+              <button
+                key={wert}
+                type="button"
+                role="tab"
+                aria-selected={ansicht === wert}
+                className={"kc-ansicht-schalter__knopf" + (ansicht === wert ? " kc-ansicht-schalter__knopf--aktiv" : "")}
+                onClick={() => setAnsicht(wert)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <div className="kc-spiele-liste">
+            {ansicht === "zeit" && sichtbareChrono.map((s, i) => {
+              const vorher = sichtbareChrono[i - 1];
+              const neuerSlot = !vorher || (vorher.uhrzeit || "") !== (s.uhrzeit || "");
+              return (
+                <React.Fragment key={s.id}>
+                  {neuerSlot && (
+                    <div className="kc-zeitslot-kopf">{s.uhrzeit ? `🕐 ${s.uhrzeit} Uhr` : "Uhrzeit noch offen"}</div>
+                  )}
+                  {spielZeileFuer(s)}
+                </React.Fragment>
+              );
+            })}
+            {ansicht !== "zeit" && ansichtGruppierung.map((grp) => (
+              <React.Fragment key={grp.schluessel}>
+                <div className="kc-zeitslot-kopf">{grp.titel}</div>
+                {grp.spiele.map((s) => (
+                  <React.Fragment key={s.id}>{spielZeileFuer(s)}</React.Fragment>
+                ))}
               </React.Fragment>
-            );
-          })}
-        </div>
+            ))}
+          </div>
+        </>
       )}
     </div>
   ) : null;
@@ -3386,7 +3471,7 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
             </h3>
             <div className="kc-spiele-liste">
               {sichtbar.map((s) => (
-                <SpielZeile key={s.id} spiel={s} teamName={teamName} bearbeitbar={bearbeitbar && !s.freilos} onSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} zeigeSieger nummer={nummern[s.id]} hervorheben={filterBegriff} />
+                <SpielZeile key={s.id} spiel={s} teamName={teamName} bearbeitbar={bearbeitbar && !s.freilos} onSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} zeigeSieger nummer={nummern[s.id]} hervorheben={filterBegriff} istNaechstes={naechstesId === s.id} />
               ))}
             </div>
           </div>
@@ -3396,7 +3481,7 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
         <div className="kc-runde-block">
           <h3 className="kc-h3">Spiel um Platz 3</h3>
           <div className="kc-spiele-liste">
-            <SpielZeile spiel={plan.platz3Spiel} teamName={teamName} bearbeitbar={bearbeitbar} onSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} zeigeSieger nummer={nummern[plan.platz3Spiel.id]} hervorheben={filterBegriff} />
+            <SpielZeile spiel={plan.platz3Spiel} teamName={teamName} bearbeitbar={bearbeitbar} onSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} zeigeSieger nummer={nummern[plan.platz3Spiel.id]} hervorheben={filterBegriff} istNaechstes={naechstesId === plan.platz3Spiel.id} />
           </div>
         </div>
       )}
@@ -3421,7 +3506,7 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
                 <div key={s.id} style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                   <span className="kc-notiz" style={{ minWidth: "52px" }}>Tisch {s.tisch}</span>
                   <div style={{ flex: 1 }}>
-                    <SpielZeile spiel={s} teamName={teamName} bearbeitbar={bearbeitbar} onSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} zeigeSieger nummer={nummern[s.id]} hervorheben={filterBegriff} />
+                    <SpielZeile spiel={s} teamName={teamName} bearbeitbar={bearbeitbar} onSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} zeigeSieger nummer={nummern[s.id]} hervorheben={filterBegriff} istNaechstes={naechstesId === s.id} />
                   </div>
                 </div>
               ))}
@@ -3452,6 +3537,20 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
           <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => spielplanAlsPdfHerunterladen(plan, teams, turnier, turnier.sponsoren)}>
             📄 Als PDF herunterladen
           </button>
+          {naechstesId && (
+            <button
+              className="kc-btn kc-btn--primary kc-btn--klein"
+              onClick={() => {
+                if (filterBegriff !== "") setVereinsFilter("");
+                setTimeout(() => {
+                  const el = document.getElementById("kc-naechstes-spiel");
+                  if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+                }, 50);
+              }}
+            >
+              ▶ Nächstes Spiel
+            </button>
+          )}
         </div>
       )}
       <div className="kc-spielplan-filter">
@@ -3513,7 +3612,7 @@ function teamNameMitTreffer(name, begriff) {
   return <span className="kc-team-treffer">{name}</span>;
 }
 
-function SpielZeile({ spiel, teamName, bearbeitbar, onSpeichern, onZeitSpeichern, zeigeSieger, nummer, gruppenName, hervorheben }) {
+function SpielZeile({ spiel, teamName, bearbeitbar, onSpeichern, onZeitSpeichern, zeigeSieger, nummer, gruppenName, hervorheben, istNaechstes }) {
   const [heim, setHeim] = useState(spiel.heimTore ?? "");
   const [gast, setGast] = useState(spiel.gastTore ?? "");
   const [siegerWahl, setSiegerWahl] = useState("");
@@ -3544,7 +3643,10 @@ function SpielZeile({ spiel, teamName, bearbeitbar, onSpeichern, onZeitSpeichern
   };
 
   return (
-    <div className="kc-spiel-zeile">
+    <div
+      className={"kc-spiel-zeile" + (hatErgebnis ? " kc-spiel-zeile--fertig" : "") + (istNaechstes ? " kc-spiel-zeile--naechstes" : "")}
+      id={istNaechstes ? "kc-naechstes-spiel" : undefined}
+    >
       {bearbeitbar && onZeitSpeichern && zeitBearbeiten ? (
         <div className="kc-spiel-zeit-bearbeiten">
           <input className="kc-input kc-input--klein" type="time" value={uhrzeitEingabe} onChange={(e) => setUhrzeitEingabe(e.target.value)} />
@@ -3556,6 +3658,8 @@ function SpielZeile({ spiel, teamName, bearbeitbar, onSpeichern, onZeitSpeichern
         <span className="kc-spiel-meta">
           {nummer ? <strong className="kc-spiel-nr">Spiel {nummer}</strong> : null}
           {nummer ? "  " : ""}
+          {istNaechstes ? <span className="kc-spiel-marke kc-spiel-marke--naechstes">▶ Als Nächstes  </span> : null}
+          {hatErgebnis ? <span className="kc-spiel-marke kc-spiel-marke--fertig">✓ gespielt  </span> : null}
           {gruppenName ? `${gruppenName}  ` : ""}
           {spiel.rueckspiel ? "🔁 Rückspiel  " : ""}
           {spiel.uhrzeit ? `🕐 ${spiel.uhrzeit} Uhr${spiel.feld ? ` · Feld ${spiel.feld}` : ""}` : bearbeitbar && onZeitSpeichern ? "Uhrzeit/Feld noch nicht festgelegt" : ""}
@@ -4148,6 +4252,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
   const [adminMonatFilter, setAdminMonatFilter] = useState("");
   const [adminJugendFilter, setAdminJugendFilter] = useState("");
   const [adminSuche, setAdminSuche] = useState("");
+  const [filterOffen, setFilterOffen] = useState(false);
 
   const nachLoginProfilLaden = async (neueSession) => {
     setProfilLaedt(true);
@@ -5060,37 +5165,42 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
             <p className="kc-sub">Angemeldet als <strong>{adminProfil.name}</strong> ({adminProfil.email})</p>
           </div>
           <div className="kc-admin-kopf-aktionen">
-            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => setZeigePasswortAendern((v) => !v)}>
-              Mein Passwort ändern
-            </button>
-            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => setZeigeAdminsVerwalten((v) => !v)}>
-              Admins verwalten
-            </button>
-            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => setZeigeDatenschutzTools((v) => !v)}>
-              Datenschutz &amp; Löschung
-            </button>
-            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => setZeigeDokumenteVerwalten((v) => !v)}>
-              Dokumente
-            </button>
-            <button
-              className="kc-btn kc-btn--sekundaer kc-btn--klein"
-              onClick={() => {
-                const neuerStatus = !zeigeSponsorAnfragen;
-                setZeigeSponsorAnfragen(neuerStatus);
-                if (neuerStatus) sponsorAnfragenLaden();
-              }}
-            >
-              Sponsor-Anfragen
-            </button>
-            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => setZeigeEinnahmen((v) => !v)}>
-              Einnahmenübersicht
-            </button>
-            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => setZeigeSpielplanTest((v) => !v)}>
-              Testspielplan
-            </button>
-            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={alleExportieren} disabled={anmeldungen.length === 0}>
-              Alle als CSV exportieren
-            </button>
+            <AdminMenue label="Auswertung">
+              <button role="menuitem" className="kc-menue__eintrag" onClick={() => setZeigeEinnahmen((v) => !v)}>
+                Einnahmenübersicht
+              </button>
+              <button role="menuitem" className="kc-menue__eintrag" onClick={() => setZeigeSpielplanTest((v) => !v)}>
+                Testspielplan
+              </button>
+              <button role="menuitem" className="kc-menue__eintrag" onClick={alleExportieren} disabled={anmeldungen.length === 0}>
+                Alle als CSV exportieren
+              </button>
+            </AdminMenue>
+            <AdminMenue label="Verwaltung">
+              <button
+                role="menuitem"
+                className="kc-menue__eintrag"
+                onClick={() => {
+                  const neuerStatus = !zeigeSponsorAnfragen;
+                  setZeigeSponsorAnfragen(neuerStatus);
+                  if (neuerStatus) sponsorAnfragenLaden();
+                }}
+              >
+                Sponsor-Anfragen
+              </button>
+              <button role="menuitem" className="kc-menue__eintrag" onClick={() => setZeigeDokumenteVerwalten((v) => !v)}>
+                Dokumente
+              </button>
+              <button role="menuitem" className="kc-menue__eintrag" onClick={() => setZeigeDatenschutzTools((v) => !v)}>
+                Datenschutz &amp; Löschung
+              </button>
+              <button role="menuitem" className="kc-menue__eintrag" onClick={() => setZeigeAdminsVerwalten((v) => !v)}>
+                Admins verwalten
+              </button>
+              <button role="menuitem" className="kc-menue__eintrag" onClick={() => setZeigePasswortAendern((v) => !v)}>
+                Mein Passwort ändern
+              </button>
+            </AdminMenue>
             <button
               className="kc-btn kc-btn--primary"
               onClick={() => {
@@ -5189,9 +5299,10 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
             if (adminSuche.trim() !== "" && !t.name.toLowerCase().includes(adminSuche.trim().toLowerCase())) return false;
             return true;
           });
+          const filterAktiv = adminMonatFilter !== "" || adminJugendFilter !== "" || adminSuche.trim() !== "";
           return (
             <>
-              <div className="kc-filter-leiste">
+              <div className="kc-filter-leiste kc-filter-leiste--kompakt">
                 <label className="kc-feld kc-feld--suche">
                   <span>Turnier suchen</span>
                   <input
@@ -5202,29 +5313,13 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                     placeholder="Turniername eingeben …"
                   />
                 </label>
-                <label className="kc-feld">
-                  <span>Monat</span>
-                  <select className="kc-input" value={adminMonatFilter} onChange={(e) => setAdminMonatFilter(e.target.value)}>
-                    <option value="">Alle Monate</option>
-                    {verfuegbareMonate.map((m) => (
-                      <option key={m} value={m}>{MONATSNAMEN[m]}</option>
-                    ))}
-                  </select>
-                </label>
-                <label className="kc-feld">
-                  <span>Jugend</span>
-                  <select className="kc-input" value={adminJugendFilter} onChange={(e) => setAdminJugendFilter(e.target.value)}>
-                    <option value="">Alle Jugenden</option>
-                    {JUGEND_GRUPPEN.map((g) => (
-                      <option key={g.wert} value={g.wert}>{g.label}</option>
-                    ))}
-                  </select>
-                </label>
-                {(adminMonatFilter !== "" || adminJugendFilter !== "" || adminSuche.trim() !== "") && (
-                  <button className="kc-btn kc-btn--sekundaer kc-btn--klein kc-filter-zuruecksetzen" onClick={() => { setAdminMonatFilter(""); setAdminJugendFilter(""); setAdminSuche(""); }}>
-                    Filter zurücksetzen
-                  </button>
-                )}
+                <button
+                  className="kc-btn kc-btn--sekundaer kc-btn--klein"
+                  aria-expanded={filterOffen || filterAktiv}
+                  onClick={() => setFilterOffen((v) => !v)}
+                >
+                  Filter {filterOffen || filterAktiv ? "▴" : "▾"}{filterAktiv ? " •" : ""}
+                </button>
                 {gefiltert.length > 0 && (
                   <>
                     <button
@@ -5242,6 +5337,33 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                   </>
                 )}
               </div>
+              {(filterOffen || filterAktiv) && (
+                <div className="kc-filter-leiste">
+                  <label className="kc-feld">
+                    <span>Monat</span>
+                    <select className="kc-input" value={adminMonatFilter} onChange={(e) => setAdminMonatFilter(e.target.value)}>
+                      <option value="">Alle Monate</option>
+                      {verfuegbareMonate.map((m) => (
+                        <option key={m} value={m}>{MONATSNAMEN[m]}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="kc-feld">
+                    <span>Jugend</span>
+                    <select className="kc-input" value={adminJugendFilter} onChange={(e) => setAdminJugendFilter(e.target.value)}>
+                      <option value="">Alle Jugenden</option>
+                      {JUGEND_GRUPPEN.map((g) => (
+                        <option key={g.wert} value={g.wert}>{g.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                  {filterAktiv && (
+                    <button className="kc-btn kc-btn--sekundaer kc-btn--klein kc-filter-zuruecksetzen" onClick={() => { setAdminMonatFilter(""); setAdminJugendFilter(""); setAdminSuche(""); }}>
+                      Filter zurücksetzen
+                    </button>
+                  )}
+                </div>
+              )}
               {gefiltert.length === 0 && <div className="kc-empty">Kein Turnier passt zu den gewählten Filtern.</div>}
               {(() => {
               // Vergangene Turniere (ab dem Zeitpunkt, an dem sie für Vereine nicht mehr sichtbar sind) kommen in einen
@@ -5275,6 +5397,21 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                   <span className="kc-zahl-gross">{belegt}/{t.maxPlaetze}</span>
                   <span className="kc-zahl-label">belegt{wartelisteRegs.length > 0 ? ` · ${wartelisteRegs.length} Warteliste` : ""}</span>
                 </div>
+              </div>
+              <div className="kc-fortschritt" role="img" aria-label={`${belegt} von ${t.maxPlaetze} Plätzen belegt`}>
+                <div
+                  className={`kc-fortschritt__fuellung${frei === 0 ? " kc-fortschritt__fuellung--voll" : ""}`}
+                  style={{ width: `${t.maxPlaetze > 0 ? Math.min(100, Math.round((belegt / t.maxPlaetze) * 100)) : 0}%` }}
+                />
+              </div>
+              <div className="kc-status-zusammenfassung">
+                <span className={`kc-status-chip ${t.veroeffentlicht === false ? "kc-status-chip--gelb" : "kc-status-chip--gruen"}`}>
+                  {t.veroeffentlicht === false ? "📝 Entwurf (nicht öffentlich)" : "🌐 Öffentlich"}
+                </span>
+                <span className={`kc-status-chip ${spielplaene.some((p) => p.turnierId === t.id) ? "kc-status-chip--gruen" : "kc-status-chip--gelb"}`}>
+                  {spielplaene.some((p) => p.turnierId === t.id) ? "⚽ Spielplan vorhanden" : "⚠️ Spielplan fehlt"}
+                </span>
+                {frei === 0 && <span className="kc-status-chip kc-status-chip--rot">🔒 Ausgebucht</span>}
               </div>
               {regsFuerTurnier.length > 0 && (
                 <div className="kc-status-zusammenfassung">
@@ -5312,8 +5449,20 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                 >
                   Bearbeiten
                 </button>
+                <button className="kc-btn kc-btn--sekundaer" onClick={() => setOffenerSpielplanTurnier(t)}>
+                  {spielplaene.some((p) => p.turnierId === t.id) ? "Spielplan verwalten" : "Spielplan erstellen"}
+                </button>
+                {t.veroeffentlicht === false && (
+                  <button
+                  className="kc-btn kc-btn--primary"
+                  onClick={() => turnierVeroeffentlichungUmschalten(t)}
+                >
+                  {t.veroeffentlicht === false ? "✅ Veröffentlichen" : "📝 Als Entwurf zurückziehen"}
+                </button>
+                )}
+                <AdminMenue label="Mehr" rechts>
                 <button
-                  className="kc-btn kc-btn--sekundaer"
+                  role="menuitem" className="kc-menue__eintrag"
                   title="Legt eine Kopie dieses Turniers als Entwurf an - z. B. für eine andere Jugend"
                   onClick={() => {
                     setBearbeitetesTurnier(null);
@@ -5324,14 +5473,16 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                 >
                   Duplizieren
                 </button>
+                {t.veroeffentlicht !== false && (
                 <button
-                  className="kc-btn kc-btn--sekundaer"
+                  role="menuitem" className="kc-menue__eintrag"
                   onClick={() => turnierVeroeffentlichungUmschalten(t)}
                 >
                   {t.veroeffentlicht === false ? "✅ Veröffentlichen" : "📝 Als Entwurf zurückziehen"}
                 </button>
+                )}
                 <button
-                  className="kc-btn kc-btn--sekundaer"
+                  role="menuitem" className="kc-menue__eintrag"
                   onClick={() => setOffeneSponsoren((prev) => {
                     const next = new Set(prev);
                     if (next.has(t.id)) next.delete(t.id); else next.add(t.id);
@@ -5340,25 +5491,22 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                 >
                   🏷️ Sponsoren{(t.sponsoren || []).length > 0 ? ` (${t.sponsoren.length})` : ""}
                 </button>
-                <button className="kc-btn kc-btn--sekundaer" onClick={() => setOffenerSpielplanTurnier(t)}>
-                  {spielplaene.some((p) => p.turnierId === t.id) ? "Spielplan verwalten" : "Spielplan erstellen"}
-                </button>
                 <button
-                  className="kc-btn kc-btn--sekundaer"
+                  role="menuitem" className="kc-menue__eintrag"
                   onClick={() => turnierExportieren(t, regsFuerTurnier)}
                   disabled={regsFuerTurnier.length === 0}
                 >
                   CSV exportieren
                 </button>
                 <button
-                  className="kc-btn kc-btn--sekundaer"
+                  role="menuitem" className="kc-menue__eintrag"
                   onClick={() => teilnehmerlisteAlsPdfHerunterladen(t, regsFuerTurnier, jetzt)}
                   disabled={regsFuerTurnier.length === 0}
                 >
                   📄 Teilnehmerliste als PDF
                 </button>
                 <button
-                  className="kc-btn kc-btn--sekundaer"
+                  role="menuitem" className="kc-menue__eintrag"
                   onClick={async () => {
                     const ergebnis = kontakteVcfVorbereiten(t, bestaetigteRegs);
                     if (!ergebnis) { alert("Keine Telefonnummern zum Exportieren vorhanden."); return; }
@@ -5381,7 +5529,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                   📇 Kontakte exportieren (bestätigt)
                 </button>
                 <button
-                  className="kc-btn kc-btn--sekundaer"
+                  role="menuitem" className="kc-menue__eintrag"
                   onClick={() => setOffeneWhatsapp((prev) => {
                     const next = new Set(prev);
                     if (next.has(t.id)) next.delete(t.id); else next.add(t.id);
@@ -5390,7 +5538,8 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                 >
                   💬 WhatsApp-Gruppe{whatsappGruppen[t.id] ? " ✓" : ""}
                 </button>
-                <button className="kc-btn kc-btn--gefahr" onClick={() => turnierLoeschen(t.id)}>Löschen</button>
+                <button role="menuitem" className="kc-menue__eintrag kc-menue__eintrag--gefahr" onClick={() => turnierLoeschen(t.id)}>Löschen</button>
+                </AdminMenue>
               </div>
 
               {vcfExport && vcfExport.turnierId === t.id && (
@@ -6480,6 +6629,33 @@ function SponsorAnfragenVerwalten({ anfragen, laedt, onMarkieren, onLoeschen, on
   );
 }
 
+// Aufklappmenü für Admin-Aktionen: bündelt Buttons, ohne dass einer verloren geht. Ein Klick auf einen
+// Eintrag führt dessen Aktion aus und schließt das Menü; Klick daneben schließt es ebenfalls.
+function AdminMenue({ label, children, rechts = false, gefahr = false }) {
+  const [offen, setOffen] = useState(false);
+  return (
+    <div className="kc-menue">
+      <button
+        type="button"
+        className={`kc-btn ${gefahr ? "kc-btn--gefahr" : "kc-btn--sekundaer"} kc-btn--klein kc-menue__knopf`}
+        aria-haspopup="true"
+        aria-expanded={offen}
+        onClick={() => setOffen((v) => !v)}
+      >
+        {label} <span aria-hidden="true">{offen ? "▴" : "▾"}</span>
+      </button>
+      {offen && (
+        <>
+          <div className="kc-menue__hinter" onClick={() => setOffen(false)} />
+          <div className={`kc-menue__liste${rechts ? " kc-menue__liste--rechts" : ""}`} role="menu" onClick={() => setOffen(false)}>
+            {children}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // Testspielplan (nur Admin): Planungsrechner ohne Anmeldungen - es wird nichts gespeichert. Der Admin gibt
 // Anzahl Mannschaften, Format, Zeiten und Felder ein und sieht sofort den kompletten Ablauf inkl.
 // Halbfinale/Finale, Gesamtdauer und Endzeit - zum Durchspielen verschiedener Varianten vor dem Turnier.
@@ -7133,7 +7309,7 @@ const CSS = `
 .kc-spiel-aktionen { display: flex; align-items: center; gap: 8px; width: 100%; margin-top: 4px; }
 .kc-team-sieger { font-weight: 700; color: var(--kc-green); }
 
-.kc-spielplan-aktionen { display: flex; justify-content: flex-end; margin-bottom: 10px; }
+.kc-spielplan-aktionen { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 .kc-qr-block { display: flex; gap: 14px; align-items: center; background: #F4F6F3; border-radius: 10px; padding: 12px 14px; margin-bottom: 16px; flex-wrap: wrap; }
 .kc-qr-block img { border-radius: 6px; background: white; padding: 4px; flex-shrink: 0; }
 .kc-link-zeile { margin-top: 6px; }
@@ -7174,6 +7350,47 @@ const CSS = `
 .kc-testplan-kennzahlen span { font-size: 12px; color: var(--kc-muted); }
 .kc-testplan-gruppen { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-top: 8px; }
 .kc-testplan-tabelle td, .kc-testplan-tabelle th { white-space: nowrap; }
+.kc-menue { position: relative; display: inline-block; }
+.kc-menue__knopf { border-radius: 999px; padding-left: 16px; padding-right: 14px; transition: background 0.15s, box-shadow 0.15s; }
+.kc-menue__knopf[aria-expanded="true"] { background: var(--kc-pitch); color: #FFFFFF; box-shadow: 0 2px 8px rgba(27,42,71,0.25); }
+.kc-menue__hinter { position: fixed; inset: 0; z-index: 40; background: transparent; }
+.kc-menue__liste { position: absolute; top: calc(100% + 8px); left: 0; z-index: 41; min-width: 240px; background: #FFFFFF; border: 1px solid #E1E7EF; border-radius: 16px; box-shadow: 0 12px 32px rgba(27,42,71,0.18); padding: 8px; display: flex; flex-direction: column; gap: 2px; animation: kc-menue-ein 0.14s ease-out; }
+.kc-menue__liste--rechts { left: auto; right: 0; }
+@keyframes kc-menue-ein { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+.kc-menue__eintrag { text-align: left; background: transparent; border: 0; padding: 11px 14px; border-radius: 10px; font: inherit; font-size: 14px; font-weight: 600; color: var(--kc-pitch); cursor: pointer; transition: background 0.12s; }
+.kc-menue__eintrag:hover:not(:disabled), .kc-menue__eintrag:focus-visible { background: #E8F0F8; outline: none; }
+.kc-menue__eintrag:disabled { opacity: 0.4; cursor: not-allowed; }
+.kc-menue__eintrag--gefahr { color: var(--kc-red); margin-top: 6px; border-top: 1px solid #EEF1F5; border-radius: 0 0 10px 10px; }
+.kc-menue__eintrag--gefahr:hover:not(:disabled) { background: #FBEDEB; }
+@media (max-width: 640px) {
+  .kc-menue__hinter { background: rgba(27,42,71,0.35); }
+  .kc-menue__liste, .kc-menue__liste--rechts { position: fixed; top: auto; left: 12px; right: 12px; bottom: 12px; min-width: 0; max-height: 70vh; overflow-y: auto; border-radius: 20px; padding: 10px; animation: kc-menue-hoch 0.18s ease-out; }
+  .kc-menue__eintrag { padding: 14px 16px; font-size: 15.5px; }
+}
+@keyframes kc-menue-hoch { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+.kc-filter-leiste--kompakt { margin-bottom: 8px; }
+.kc-fortschritt { height: 8px; border-radius: 999px; background: #E3EAF2; overflow: hidden; margin: 12px 0 2px; }
+.kc-fortschritt__fuellung { height: 100%; background: linear-gradient(90deg, var(--kc-green), var(--kc-blue)); border-radius: 999px; transition: width 0.4s ease; }
+.kc-fortschritt__fuellung--voll { background: linear-gradient(90deg, #C1443A, #E07A70); }
+.kc-ansicht-schalter { display: inline-flex; flex-wrap: wrap; gap: 4px; background: #E3EAF2; border-radius: 999px; padding: 4px; margin: 4px 0 12px; }
+.kc-ansicht-schalter__knopf { border: 0; background: transparent; color: var(--kc-pitch); font: inherit; font-size: 13.5px; font-weight: 600; padding: 7px 14px; border-radius: 999px; cursor: pointer; transition: background 0.15s, color 0.15s; }
+.kc-ansicht-schalter__knopf:hover { background: rgba(255,255,255,0.6); }
+.kc-ansicht-schalter__knopf--aktiv, .kc-ansicht-schalter__knopf--aktiv:hover { background: var(--kc-pitch); color: #FFFFFF; box-shadow: 0 2px 6px rgba(27,42,71,0.22); }
+.kc-spiel-zeile--fertig { border-left: 4px solid var(--kc-green); }
+.kc-spiel-zeile--naechstes { border-left: 4px solid var(--kc-blue); background: #EEF5FB; box-shadow: 0 0 0 2px rgba(111,168,216,0.45); }
+.kc-spiel-marke { font-size: 11.5px; font-weight: 700; border-radius: 999px; padding: 2px 8px; }
+.kc-spiel-marke--fertig { background: #E1EDF7; color: var(--kc-green); }
+.kc-spiel-marke--naechstes { background: var(--kc-blue); color: #FFFFFF; }
+.kc-fortschritt__text { font-size: 12.5px; color: var(--kc-muted); margin: 4px 0 0; }
+.kc-schritte { list-style: none; display: flex; gap: 0; margin: 14px 0 6px; padding: 0; }
+.kc-schritte__punkt { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; position: relative; font-size: 12px; font-weight: 600; color: var(--kc-muted); text-align: center; }
+.kc-schritte__punkt::before { content: ""; position: absolute; top: 14px; left: -50%; width: 100%; height: 3px; background: #E3EAF2; z-index: 0; }
+.kc-schritte__punkt:first-child::before { display: none; }
+.kc-schritte__punkt--fertig::before, .kc-schritte__punkt--aktuell::before { background: linear-gradient(90deg, var(--kc-green), var(--kc-blue)); }
+.kc-schritte__kreis { position: relative; z-index: 1; width: 28px; height: 28px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; background: #E3EAF2; color: var(--kc-muted); font-size: 13px; font-weight: 700; }
+.kc-schritte__punkt--fertig .kc-schritte__kreis { background: var(--kc-green); color: #FFFFFF; }
+.kc-schritte__punkt--aktuell .kc-schritte__kreis { background: #FFFFFF; color: var(--kc-green); box-shadow: 0 0 0 3px var(--kc-blue); }
+.kc-schritte__punkt--fertig, .kc-schritte__punkt--aktuell { color: var(--kc-pitch); }
 .kc-archiv { margin-top: 18px; display: flex; flex-direction: column; gap: 16px; }
 .kc-archiv__kopf { align-self: flex-start; font-weight: 700; }
 .kc-fehler { color: var(--kc-red); font-size: 13.5px; margin-top: 8px; }
