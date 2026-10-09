@@ -1037,6 +1037,172 @@ function erstelleHalbfinalePlan(plan, optionen) {
   return { runden: [runde1, finale], platz3Spiel };
 }
 
+// Testspielplan / Planungsrechner: erzeugt aus reinen Angaben (Anzahl Mannschaften, Format, Zeiten,
+// Felder) einen kompletten Probe-Spielplan MIT Endrunde - ohne Anmeldungen und ohne etwas zu speichern.
+// So lässt sich vorab planen, wann ein Turnier beginnt und endet. Die Begegnungen der Endrunde stehen
+// als Platzhalter (z. B. "Sieger Halbfinale 1"), weil sie erst nach den Gruppenspielen feststehen.
+function testSpielplanErzeugen(opt) {
+  const n = Math.max(2, Math.floor(opt.anzahlTeams) || 2);
+  const felder = Math.max(1, Math.floor(opt.anzahlFelder) || 1);
+  const spielzeit = Math.max(1, Math.floor(opt.spieldauerMin) || 1);
+  const takt = spielzeit + Math.max(0, Math.floor(opt.wechselzeitMin) || 0);
+  const pause = Math.max(0, Math.floor(opt.endrundenPauseMin) || 0);
+  const startMin = minutenAusUhrzeit(opt.startzeit || "09:00");
+  const ids = Array.from({ length: n }, (_, i) => "t" + (i + 1));
+  const teamName = (id) => "Team " + id.slice(1);
+  const eintraege = []; // { slot, extra, feld, phase, gruppe, heim, gast, vorgaenger }
+
+  // Verteilt Spiele auf Zeit-Slots (je Slot bis zu "felder" Spiele, Mannschaften nicht doppelt) und
+  // liefert die Slot-Nummer je Spiel. Trick: Spieldauer 1 => die "Uhrzeit" ist direkt die Slot-Nummer.
+  const slotsVergeben = (spiele) => {
+    zeitenZuweisenAnListe(spiele, { startzeit: "00:00", spieldauerMin: 1, anzahlFelder: felder });
+    return spiele.map((sp) => ({ sp, slot: minutenAusUhrzeit(sp.uhrzeit), feld: sp.feld }));
+  };
+  const maxSlot = (liste) => liste.reduce((m, e) => Math.max(m, e.slot), -1);
+
+  let gruppenListe = [];
+  let basis = 0;
+  let extra = 0;
+  const format = opt.format;
+
+  if (format !== "ko") {
+    const anzahlGruppen = format === "liga" ? 1 : Math.max(1, Math.min(Math.floor(opt.anzahlGruppen) || 2, Math.floor(n / 2) || 1));
+    const plan = erstelleGruppenplan(ids, anzahlGruppen, !!opt.mitRueckrunde);
+    gruppenListe = plan.gruppen.map((g) => ({ name: g.name, teams: g.teamIds.map(teamName) }));
+    const namVonId = {};
+    plan.gruppen.forEach((g) => { namVonId[g.id] = g.name; });
+    const zugewiesen = slotsVergeben(plan.spiele);
+    zugewiesen.forEach(({ sp, slot, feld }) => {
+      eintraege.push({ slot, extra: 0, feld, phase: format === "liga" ? "Liga" : "Gruppenphase", gruppe: namVonId[sp.gruppeId] || "", heim: teamName(sp.heimId), gast: teamName(sp.gastId) });
+    });
+    basis = maxSlot(zugewiesen) + 1;
+    extra = pause;
+
+    if (format === "gruppen_hf" && n >= 4 && anzahlGruppen >= 2) {
+      const hf = [
+        { heimId: "a1", gastId: "a4" },
+        { heimId: "a2", gastId: "a3" },
+      ].map((x) => ({ ...x }));
+      const hfZ = slotsVergeben(hf);
+      const labels = anzahlGruppen === 2
+        ? [["1. Gruppe A", "2. Gruppe B"], ["1. Gruppe B", "2. Gruppe A"]]
+        : [["Setzplatz 1", "Setzplatz 4"], ["Setzplatz 2", "Setzplatz 3"]];
+      const hfEintraege = hfZ.map(({ slot, feld }, i) => {
+        const e = { slot: basis + slot, extra, feld, phase: "Halbfinale", gruppe: "", heim: labels[i][0], gast: labels[i][1] };
+        eintraege.push(e);
+        return e;
+      });
+      const nachHf = basis + maxSlot(hfZ) + 1;
+      const letzte = [];
+      if (opt.spielUmPlatz3) letzte.push({ heimId: "p1", gastId: "p2", art: "platz3" });
+      letzte.push({ heimId: "f1", gastId: "f2", art: "finale" });
+      const lZ = slotsVergeben(letzte.map((x) => ({ ...x })));
+      lZ.forEach(({ sp, slot, feld }) => {
+        eintraege.push({
+          slot: nachHf + slot, extra, feld,
+          phase: sp.art === "finale" ? "Finale" : "Spiel um Platz 3",
+          gruppe: "",
+          heim: sp.art === "finale" ? "Sieger Halbfinale 1" : "Verlierer Halbfinale 1",
+          gast: sp.art === "finale" ? "Sieger Halbfinale 2" : "Verlierer Halbfinale 2",
+          vorgaengerHf: hfEintraege,
+        });
+      });
+    }
+  } else {
+    // Reines K.o.-System: erste Runde mit echten Paarungen, spätere Runden als "Sieger Spiel X".
+    const plan = erstelleKoPlan(ids, { spielUmPlatz3: !!opt.spielUmPlatz3 && n >= 4 });
+    const rundenAnzahl = plan.runden.length;
+    let vorher = [];
+    let slotStart = 0;
+    plan.runden.forEach((runde, r) => {
+      const dummies = runde
+        .map((sp, idx) => ({ sp, idx }))
+        .filter((x) => !x.sp.freilos)
+        .map((x, i) => ({ heimId: "r" + r + "h" + i, gastId: "r" + r + "g" + i, quelleIndex: x.idx, orig: x.sp }));
+      const istLetzte = r === rundenAnzahl - 1;
+      if (istLetzte && plan.platz3Spiel) dummies.unshift({ heimId: "p1", gastId: "p2", platz3: true, quelleIndex: -1 });
+      const z = slotsVergeben(dummies);
+      const titel = istLetzte ? "Finale" : r === rundenAnzahl - 2 ? "Halbfinale" : r === rundenAnzahl - 3 ? "Viertelfinale" : "Runde " + (r + 1);
+      const neue = [];
+      z.forEach(({ sp, slot, feld }) => {
+        const e = {
+          slot: slotStart + slot, extra: r === 0 ? 0 : pause, feld,
+          phase: sp.platz3 ? "Spiel um Platz 3" : titel, gruppe: "",
+          ko: true, runde: r, quelleIndex: sp.quelleIndex, orig: sp.orig, platz3: !!sp.platz3, vorher,
+        };
+        eintraege.push(e);
+        if (!sp.platz3) neue.push(e);
+      });
+      slotStart += maxSlot(z) + 1;
+      vorher = neue;
+    });
+    // Namen der Freilos-Sieger (stehen schon fest und tauchen nicht als eigenes Spiel auf)
+    eintraege.freilosName = (r, idx) => {
+      const sp = plan.runden[r] && plan.runden[r][idx];
+      return sp && sp.sieger ? teamName(sp.sieger) : "Sieger Vorrunde";
+    };
+  }
+
+  // Chronologisch ordnen und durchnummerieren
+  const minuten = (e) => startMin + e.slot * takt + (e.extra || 0);
+  eintraege.sort((a, b) => minuten(a) - minuten(b) || (a.feld || 0) - (b.feld || 0));
+  eintraege.forEach((e, i) => { e.nr = i + 1; });
+
+  // K.o.: Texte erst nach der Nummerierung bestimmen ("Sieger Spiel 3")
+  if (format === "ko") {
+    const freilosName = eintraege.freilosName;
+    eintraege.forEach((e) => {
+      if (e.runde === 0 && !e.platz3) {
+        e.heim = teamName(e.orig.heimId);
+        e.gast = teamName(e.orig.gastId);
+        return;
+      }
+      if (e.platz3) {
+        const [h1, h2] = e.vorher;
+        e.heim = h1 ? "Verlierer Spiel " + h1.nr : "Verlierer Halbfinale 1";
+        e.gast = h2 ? "Verlierer Spiel " + h2.nr : "Verlierer Halbfinale 2";
+        return;
+      }
+      const stelle = (idx) => {
+        const kandidat = e.vorher.find((v) => v.quelleIndex === idx);
+        return kandidat ? "Sieger Spiel " + kandidat.nr : freilosName(e.runde - 1, idx);
+      };
+      e.heim = stelle(e.quelleIndex * 2);
+      e.gast = stelle(e.quelleIndex * 2 + 1);
+    });
+  }
+  if (format === "gruppen_hf") {
+    eintraege.forEach((e) => {
+      if (e.vorgaengerHf) {
+        const [h1, h2] = e.vorgaengerHf;
+        if (e.phase === "Finale") { e.heim = "Sieger Spiel " + h1.nr; e.gast = "Sieger Spiel " + h2.nr; }
+        else { e.heim = "Verlierer Spiel " + h1.nr; e.gast = "Verlierer Spiel " + h2.nr; }
+      }
+    });
+  }
+
+  const formatZeit = (min) => {
+    const tage = Math.floor(min / 1440);
+    return { text: addMinuten("00:00", min), tag: tage };
+  };
+  const gruppenspiele = eintraege.filter((e) => e.phase === "Gruppenphase" || e.phase === "Liga");
+  const letztesEnde = eintraege.length ? Math.max(...eintraege.map((e) => minuten(e) + spielzeit)) : startMin;
+  const hfStart = eintraege.filter((e) => e.phase === "Halbfinale" || e.phase === "Viertelfinale");
+  const tabelle = eintraege.map((e) => ({ ...e, zeit: formatZeit(minuten(e)), zeitMin: minuten(e) }));
+  return {
+    anzahlSpiele: eintraege.length,
+    gruppenListe,
+    spiele: tabelle,
+    start: formatZeit(startMin),
+    gruppenphaseEnde: gruppenspiele.length ? formatZeit(Math.max(...gruppenspiele.map((e) => minuten(e) + spielzeit))) : null,
+    endrundeStart: hfStart.length ? formatZeit(Math.min(...hfStart.map(minuten))) : null,
+    ende: formatZeit(letztesEnde),
+    dauerMin: letztesEnde - startMin,
+    ueberMitternacht: letztesEnde > 1440,
+    anzahlGruppenspiele: gruppenspiele.length,
+  };
+}
+
 // Erstellt clientseitig ein einfaches, druckbares PDF des aktuellen Spielplans (ohne Server).
 // Zeichnet eine Tabellenzeile mit echten Zellrahmen (Raster-Optik). spaltenBreiten und werte müssen
 // gleich lang sein. Mit kopf=true wird die Zeile fett und farbig hinterlegt (für Kopfzeilen).
@@ -3976,6 +4142,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
   const [sponsorAnfragen, setSponsorAnfragen] = useState([]);
   const [sponsorAnfragenLaedt, setSponsorAnfragenLaedt] = useState(false);
   const [zeigeEinnahmen, setZeigeEinnahmen] = useState(false);
+  const [zeigeSpielplanTest, setZeigeSpielplanTest] = useState(false);
   const [vcfExport, setVcfExport] = useState(null); // { turnierId, url, dateiname } - lang-drückbarer Kontakte-Export-Link
   const [offenerSpielplanTurnier, setOffenerSpielplanTurnier] = useState(null);
   const [adminMonatFilter, setAdminMonatFilter] = useState("");
@@ -4918,6 +5085,9 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
             <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => setZeigeEinnahmen((v) => !v)}>
               Einnahmenübersicht
             </button>
+            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => setZeigeSpielplanTest((v) => !v)}>
+              Testspielplan
+            </button>
             <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={alleExportieren} disabled={anmeldungen.length === 0}>
               Alle als CSV exportieren
             </button>
@@ -4987,6 +5157,8 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
           onSchliessen={() => setZeigeSponsorAnfragen(false)}
         />
       )}
+
+      {zeigeSpielplanTest && <SpielplanTest onSchliessen={() => setZeigeSpielplanTest(false)} />}
 
       {zeigeEinnahmen && (
         <EinnahmenUebersicht
@@ -6308,6 +6480,186 @@ function SponsorAnfragenVerwalten({ anfragen, laedt, onMarkieren, onLoeschen, on
   );
 }
 
+// Testspielplan (nur Admin): Planungsrechner ohne Anmeldungen - es wird nichts gespeichert. Der Admin gibt
+// Anzahl Mannschaften, Format, Zeiten und Felder ein und sieht sofort den kompletten Ablauf inkl.
+// Halbfinale/Finale, Gesamtdauer und Endzeit - zum Durchspielen verschiedener Varianten vor dem Turnier.
+function SpielplanTest({ onSchliessen }) {
+  const [anzahlTeams, setAnzahlTeams] = useState("12");
+  const [format, setFormat] = useState("gruppen_hf");
+  const [anzahlGruppen, setAnzahlGruppen] = useState("2");
+  const [mitRueckrunde, setMitRueckrunde] = useState(false);
+  const [spielUmPlatz3, setSpielUmPlatz3] = useState(true);
+  const [startzeit, setStartzeit] = useState("09:00");
+  const [spieldauerMin, setSpieldauerMin] = useState("10");
+  const [wechselzeitMin, setWechselzeitMin] = useState("0");
+  const [anzahlFelder, setAnzahlFelder] = useState("2");
+  const [endrundenPauseMin, setEndrundenPauseMin] = useState("0");
+  const [auslosung, setAuslosung] = useState(0);
+
+  const n = Math.floor(Number(anzahlTeams));
+  const eingabeOk = n >= 2 && n <= 64 && Number(spieldauerMin) >= 1 && Number(anzahlFelder) >= 1 && /^\d{2}:\d{2}$/.test(startzeit);
+  const ergebnis = useMemo(() => {
+    if (!eingabeOk) return null;
+    try {
+      return testSpielplanErzeugen({
+        anzahlTeams: n, format, anzahlGruppen: Number(anzahlGruppen), mitRueckrunde, spielUmPlatz3,
+        startzeit, spieldauerMin: Number(spieldauerMin), wechselzeitMin: Number(wechselzeitMin),
+        anzahlFelder: Number(anzahlFelder), endrundenPauseMin: Number(endrundenPauseMin),
+      });
+    } catch {
+      return null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [eingabeOk, n, format, anzahlGruppen, mitRueckrunde, spielUmPlatz3, startzeit, spieldauerMin, wechselzeitMin, anzahlFelder, endrundenPauseMin, auslosung]);
+
+  const zeitText = (z) => (z ? `${z.text} Uhr${z.tag > 0 ? ` (+${z.tag} Tag)` : ""}` : "–");
+  const dauerText = (min) => `${Math.floor(min / 60)} Std. ${String(min % 60).padStart(2, "0")} Min.`;
+  const mitGruppen = format === "gruppen" || format === "gruppen_hf";
+
+  return (
+    <div className="kc-section kc-formular-karte">
+      <h2 className="kc-h2">Testspielplan</h2>
+      <p className="kc-sub">
+        Planungshilfe: Hier lässt sich ein Spielplan mit beliebiger Mannschaftszahl durchspielen, um Uhrzeiten und
+        Dauer zu planen. Es werden keine echten Daten verwendet und nichts gespeichert.
+      </p>
+      <div className="kc-formular">
+        <div className="kc-feld-reihe">
+          <label className="kc-feld">
+            <span>Anzahl Mannschaften</span>
+            <input className="kc-input" type="number" min="2" max="64" value={anzahlTeams} onChange={(e) => setAnzahlTeams(e.target.value)} />
+          </label>
+          <label className="kc-feld">
+            <span>Format</span>
+            <select className="kc-input" value={format} onChange={(e) => setFormat(e.target.value)}>
+              <option value="gruppen_hf">Gruppenphase + Halbfinale + Finale</option>
+              <option value="gruppen">Gruppenphase</option>
+              <option value="liga">Liga (eine Gruppe)</option>
+              <option value="ko">K.o.-System</option>
+            </select>
+          </label>
+        </div>
+        {mitGruppen && (
+          <div className="kc-feld-reihe">
+            <label className="kc-feld">
+              <span>Anzahl Gruppen</span>
+              <input className="kc-input" type="number" min="1" max="8" value={anzahlGruppen} onChange={(e) => setAnzahlGruppen(e.target.value)} />
+            </label>
+            <label className="kc-checkbox-zeile">
+              <input type="checkbox" checked={mitRueckrunde} onChange={(e) => setMitRueckrunde(e.target.checked)} />
+              <span>Mit Rückrunde</span>
+            </label>
+          </div>
+        )}
+        {format === "liga" && (
+          <label className="kc-checkbox-zeile">
+            <input type="checkbox" checked={mitRueckrunde} onChange={(e) => setMitRueckrunde(e.target.checked)} />
+            <span>Mit Rückrunde</span>
+          </label>
+        )}
+        {(format === "gruppen_hf" || format === "ko") && (
+          <label className="kc-checkbox-zeile">
+            <input type="checkbox" checked={spielUmPlatz3} onChange={(e) => setSpielUmPlatz3(e.target.checked)} />
+            <span>Spiel um Platz 3</span>
+          </label>
+        )}
+        <div className="kc-feld-reihe">
+          <label className="kc-feld">
+            <span>Startzeit</span>
+            <input className="kc-input" type="time" value={startzeit} onChange={(e) => setStartzeit(e.target.value)} />
+          </label>
+          <label className="kc-feld">
+            <span>Spieldauer (Min.)</span>
+            <input className="kc-input" type="number" min="1" value={spieldauerMin} onChange={(e) => setSpieldauerMin(e.target.value)} />
+          </label>
+          <label className="kc-feld">
+            <span>Wechselzeit (Min.)</span>
+            <input className="kc-input" type="number" min="0" value={wechselzeitMin} onChange={(e) => setWechselzeitMin(e.target.value)} />
+          </label>
+        </div>
+        <div className="kc-feld-reihe">
+          <label className="kc-feld">
+            <span>Anzahl Felder</span>
+            <input className="kc-input" type="number" min="1" max="10" value={anzahlFelder} onChange={(e) => setAnzahlFelder(e.target.value)} />
+          </label>
+          {format !== "liga" && format !== "gruppen" && (
+            <label className="kc-feld">
+              <span>Pause vor Endrunde (Min.)</span>
+              <input className="kc-input" type="number" min="0" value={endrundenPauseMin} onChange={(e) => setEndrundenPauseMin(e.target.value)} />
+            </label>
+          )}
+        </div>
+      </div>
+
+      {!eingabeOk && <p className="kc-fehler">Bitte gültige Werte eintragen (2 bis 64 Mannschaften, Spieldauer und Felder mindestens 1).</p>}
+      {eingabeOk && format === "gruppen_hf" && n < 4 && (
+        <p className="kc-fehler">Für Halbfinale und Finale werden mindestens 4 Mannschaften benötigt - es werden nur die Gruppenspiele angezeigt.</p>
+      )}
+
+      {ergebnis && (
+        <>
+          <div className="kc-testplan-kennzahlen">
+            <div><strong>{ergebnis.anzahlSpiele}</strong><span>Spiele insgesamt</span></div>
+            <div><strong>{zeitText(ergebnis.start)}</strong><span>Turnierbeginn</span></div>
+            {ergebnis.gruppenphaseEnde && <div><strong>{zeitText(ergebnis.gruppenphaseEnde)}</strong><span>Ende {format === "liga" ? "Liga" : "Gruppenphase"}</span></div>}
+            {ergebnis.endrundeStart && <div><strong>{zeitText(ergebnis.endrundeStart)}</strong><span>Beginn Endrunde</span></div>}
+            <div><strong>{zeitText(ergebnis.ende)}</strong><span>Turnierende (ca.)</span></div>
+            <div><strong>{dauerText(ergebnis.dauerMin)}</strong><span>Gesamtdauer</span></div>
+          </div>
+          {ergebnis.ueberMitternacht && (
+            <p className="kc-fehler">Achtung: Der Plan läuft über Mitternacht hinaus. Bitte mehr Felder, kürzere Spiele oder weniger Mannschaften wählen.</p>
+          )}
+
+          {ergebnis.gruppenListe.length > 0 && (
+            <>
+              <div className="kc-admin-aktionen" style={{ marginTop: 14 }}>
+                <h3 className="kc-h3" style={{ margin: 0 }}>Gruppen (zufällig gelost)</h3>
+                <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => setAuslosung((v) => v + 1)}>🔀 Neu auslosen</button>
+              </div>
+              <div className="kc-testplan-gruppen">
+                {ergebnis.gruppenListe.map((g) => (
+                  <div key={g.name} className="kc-gruppe-block">
+                    <strong>{g.name}</strong>
+                    <div className="kc-notiz">{g.teams.join(", ")}</div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+
+          <h3 className="kc-h3" style={{ marginTop: 16 }}>Ablauf</h3>
+          <div style={{ overflowX: "auto" }}>
+            <table className="kc-tabelle kc-testplan-tabelle">
+              <thead>
+                <tr><th>Nr.</th><th>Zeit</th><th>Feld</th><th>Runde</th><th>Begegnung</th></tr>
+              </thead>
+              <tbody>
+                {ergebnis.spiele.map((e) => (
+                  <tr key={e.nr}>
+                    <td>{e.nr}</td>
+                    <td>{e.zeit.text}{e.zeit.tag > 0 ? ` (+${e.zeit.tag})` : ""}</td>
+                    <td>{e.feld}</td>
+                    <td>{e.gruppe || e.phase}</td>
+                    <td style={{ textAlign: "left" }}>{e.heim} – {e.gast}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="kc-notiz">
+            Die Endrunden-Begegnungen stehen als Platzhalter, weil sie erst nach den Gruppenspielen feststehen. Zeiten gelten
+            für den Spielbeginn; "Ende" ist der Beginn des letzten Spiels plus Spieldauer.
+          </p>
+        </>
+      )}
+
+      <div className="kc-admin-aktionen">
+        <button className="kc-btn kc-btn--sekundaer" onClick={onSchliessen}>Schließen</button>
+      </div>
+    </div>
+  );
+}
+
 function EinnahmenUebersicht({ turniere, anmeldungen, onSchliessen }) {
   const zeilen = berechneEinnahmenProTurnier(turniere, anmeldungen)
     .filter((z) => z.anzahlBestaetigt > 0)
@@ -6816,6 +7168,12 @@ const CSS = `
 .kc-spielplan-filter .kc-input { flex: 1 1 220px; }
 .kc-spielplan-zaehler { font-size: 13px; color: var(--kc-muted); }
 .kc-verschiebe-hinweis { font-size: 12.5px; color: var(--kc-muted); margin: 0; }
+.kc-testplan-kennzahlen { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 14px; }
+.kc-testplan-kennzahlen > div { background: #F4F7FA; border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; }
+.kc-testplan-kennzahlen strong { font-size: 15px; }
+.kc-testplan-kennzahlen span { font-size: 12px; color: var(--kc-muted); }
+.kc-testplan-gruppen { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-top: 8px; }
+.kc-testplan-tabelle td, .kc-testplan-tabelle th { white-space: nowrap; }
 .kc-archiv { margin-top: 18px; display: flex; flex-direction: column; gap: 16px; }
 .kc-archiv__kopf { align-self: flex-start; font-weight: 700; }
 .kc-fehler { color: var(--kc-red); font-size: 13.5px; margin-top: 8px; }
