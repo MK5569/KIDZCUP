@@ -5433,6 +5433,14 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                             >
                               {frei === 0 ? "Kein Platz frei" : "In Turnier aufnehmen"}
                             </button>
+                            <a
+                              className="kc-btn kc-btn--sekundaer kc-btn--klein"
+                              href={whatsappLink(a.telefon, `Hallo ${a.trainer}, hier meldet sich KIDZCUP bezüglich eurer Anmeldung für "${t.name}". Ihr steht aktuell auf der Warteliste.`)}
+                              target="_blank"
+                              rel="noopener"
+                            >
+                              📱 WhatsApp
+                            </a>
                             <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAblehnen(a)}>Ablehnen</button>
                           </div>
                         </div>
