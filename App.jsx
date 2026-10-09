@@ -1067,7 +1067,7 @@ function pdfTabellenzeile(doc, x, y, spaltenBreiten, werte, kopf) {
 
 async function spielplanAlsPdfHerunterladen(plan, teams, turnier, sponsoren = []) {
   const teamName = (id) => {
-    if (!id) return "Freilos";
+    if (!id) return "noch offen";
     if (plan.teamNamen && plan.teamNamen[id]) return plan.teamNamen[id];
     const t = teams.find((a) => a.id === id);
     return t ? t.verein : "–";
@@ -3006,7 +3006,7 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
   const [verschiebeHinweis, setVerschiebeHinweis] = useState("");
 
   const teamName = (id) => {
-    if (!id) return "Freilos";
+    if (!id) return "noch offen";
     if (plan.teamNamen && plan.teamNamen[id]) return plan.teamNamen[id];
     const t = teams.find((a) => a.id === id);
     return t ? t.verein : "–";
@@ -3966,6 +3966,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
   const [bearbeitetesTurnier, setBearbeitetesTurnier] = useState(null);
   const [turnierVorlage, setTurnierVorlage] = useState(null); // Turnier, das gerade als Vorlage dupliziert wird
   const [offeneTurniere, setOffeneTurniere] = useState(() => new Set());
+  const [archivOffen, setArchivOffen] = useState(false); // Bereich "Vergangene Turniere" ein-/ausgeklappt
   const [offeneSponsoren, setOffeneSponsoren] = useState(() => new Set());
   const [zeigePasswortAendern, setZeigePasswortAendern] = useState(false);
   const [zeigeAdminsVerwalten, setZeigeAdminsVerwalten] = useState(false);
@@ -5070,7 +5071,14 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                 )}
               </div>
               {gefiltert.length === 0 && <div className="kc-empty">Kein Turnier passt zu den gewählten Filtern.</div>}
-              {gefiltert.map((t) => {
+              {(() => {
+              // Vergangene Turniere (ab dem Zeitpunkt, an dem sie für Vereine nicht mehr sichtbar sind) kommen in einen
+              // einklappbaren Bereich am Ende - bleiben aber vollständig erhalten (Anmeldungen, Spielplan, Export).
+              const istVergangen = (t) => new Date(t.datum).getTime() + 2 * EINEN_TAG_MS <= jetzt;
+              const aktuelleTurniere = gefiltert.filter((t) => !istVergangen(t));
+              const vergangeneTurniere = gefiltert.filter(istVergangen).reverse(); // neueste zuerst
+              const archivSichtbar = archivOffen || adminSuche.trim() !== "";
+              const karteRendern = (t) => {
           const regsFuerTurnier = anmeldungen.filter((a) => a.turnierId === t.id);
           const wartelisteRegs = regsFuerTurnier.filter((a) => effektiverStatus(a, jetzt) === "warteliste");
           const aktiveRegs = regsFuerTurnier.filter((a) => effektiverStatus(a, jetzt) !== "warteliste");
@@ -5550,7 +5558,28 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
               )}
             </div>
           );
-              })}
+              };
+              return (
+                <>
+                  {aktuelleTurniere.length === 0 && vergangeneTurniere.length > 0 && (
+                    <div className="kc-empty">Keine aktuellen oder kommenden Turniere{gefiltert.length !== turniere.length ? " für diese Filter" : ""}.</div>
+                  )}
+                  {aktuelleTurniere.map(karteRendern)}
+                  {vergangeneTurniere.length > 0 && (
+                    <div className="kc-archiv">
+                      <button
+                        className="kc-btn kc-btn--sekundaer kc-archiv__kopf"
+                        onClick={() => setArchivOffen((v) => !v)}
+                        aria-expanded={archivSichtbar}
+                      >
+                        {archivSichtbar ? "▾" : "▸"} Vergangene Turniere ({vergangeneTurniere.length})
+                      </button>
+                      {archivSichtbar && vergangeneTurniere.map(karteRendern)}
+                    </div>
+                  )}
+                </>
+              );
+              })()}
             </>
           );
         })()}
@@ -6787,6 +6816,8 @@ const CSS = `
 .kc-spielplan-filter .kc-input { flex: 1 1 220px; }
 .kc-spielplan-zaehler { font-size: 13px; color: var(--kc-muted); }
 .kc-verschiebe-hinweis { font-size: 12.5px; color: var(--kc-muted); margin: 0; }
+.kc-archiv { margin-top: 18px; display: flex; flex-direction: column; gap: 16px; }
+.kc-archiv__kopf { align-self: flex-start; font-weight: 700; }
 .kc-fehler { color: var(--kc-red); font-size: 13.5px; margin-top: 8px; }
 
 .kc-status-karte { background: var(--kc-card); border-radius: 14px; padding: 22px; box-shadow: 0 1px 3px rgba(22,48,32,0.08); }
