@@ -731,10 +731,15 @@ function planMitZeitenUndFeldern(plan, optionen) {
 function berechneTabelle(gruppe, spiele) {
   const stand = {};
   gruppe.teamIds.forEach((id) => {
-    stand[id] = { teamId: id, spiele: 0, siege: 0, unentschieden: 0, niederlagen: 0, tore: 0, gegentore: 0, punkte: 0 };
+    stand[id] = { teamId: id, spiele: 0, siege: 0, unentschieden: 0, niederlagen: 0, tore: 0, gegentore: 0, punkte: 0, zurueckgezogen: false };
+  });
+  // Mannschaften, die kurzfristig abgesagt haben (Spiele "entfallen"), bleiben sichtbar, stehen aber am Tabellenende
+  // und kommen nicht für die Endrunde in Frage.
+  spiele.forEach((s) => {
+    if (s.gruppeId === gruppe.id && s.abgesagt && s.abgesagtVon && stand[s.abgesagtVon]) stand[s.abgesagtVon].zurueckgezogen = true;
   });
   spiele
-    .filter((s) => s.gruppeId === gruppe.id && s.heimTore !== null && s.gastTore !== null)
+    .filter((s) => s.gruppeId === gruppe.id && !s.abgesagt && s.heimTore !== null && s.gastTore !== null)
     .forEach((s) => {
       const heim = stand[s.heimId];
       const gast = stand[s.gastId];
@@ -747,6 +752,7 @@ function berechneTabelle(gruppe, spiele) {
       else { heim.unentschieden++; gast.unentschieden++; heim.punkte++; gast.punkte++; }
     });
   return Object.values(stand).sort((a, b) => {
+    if (a.zurueckgezogen !== b.zurueckgezogen) return a.zurueckgezogen ? 1 : -1;
     if (b.punkte !== a.punkte) return b.punkte - a.punkte;
     const diffA = a.tore - a.gegentore, diffB = b.tore - b.gegentore;
     if (diffB !== diffA) return diffB - diffA;
@@ -990,13 +996,192 @@ function gruppenMannschaftVerschieben(plan, teamId, zielGruppeId, tauschTeamId, 
   return { plan: neu, betroffeneMitErgebnis: betroffen, geaendert: true, fehler: null };
 }
 
+// ---------- Kurzfristige Änderungen am bestehenden Spielplan ----------
+// Alle Funktionen sind rein (verändern den übergebenen Plan nicht) und lassen alle übrigen Spiele,
+// Uhrzeiten, Felder, Ergebnisse und Spielnummern unangetastet.
+
+function planTeamIds(plan) {
+  const ids = new Set();
+  (plan.gruppen || []).forEach((g) => g.teamIds.forEach((id) => ids.add(id)));
+  const spiele = [...(plan.spiele || []), ...(plan.runden ? plan.runden.flat() : []), ...(plan.platz3Spiel ? [plan.platz3Spiel] : [])];
+  spiele.forEach((s) => { if (s.heimId) ids.add(s.heimId); if (s.gastId) ids.add(s.gastId); });
+  return ids;
+}
+
+// Plant neue Gruppenspiele in freie Plätze des bestehenden Rasters (Uhrzeit x Feld), ohne ein vorhandenes Spiel zu
+// verschieben. Bei laufendem Turnier ab dem ersten noch offenen Spiel, sonst hinter dem letzten Spiel.
+function neueSpieleEinplanen(plan, neueSpiele) {
+  const opt = zeitOptionenAusPlan(plan);
+  if (!opt) return;
+  const aktiv = (plan.spiele || []).filter((s) => s.uhrzeit && !s.abgesagt);
+  const alleZeiten = [...new Set((plan.spiele || []).filter((s) => s.uhrzeit).map((s) => s.uhrzeit))].sort();
+  const offene = aktiv.filter((s) => s.heimTore === null || s.gastTore === null).map((s) => s.uhrzeit).sort();
+  const ab = offene.length > 0 ? offene[0] : null;
+  const kandidaten = alleZeiten.filter((z) => ab === null || z >= ab);
+  let z = alleZeiten[alleZeiten.length - 1];
+  for (let i = 0; i < 300; i++) { z = addMinuten(z, opt.spieldauerMin); kandidaten.push(z); }
+  const felderBelegt = {};
+  const teamsBelegt = {};
+  aktiv.forEach((s) => {
+    (felderBelegt[s.uhrzeit] = felderBelegt[s.uhrzeit] || new Set()).add(Number(s.feld) || 1);
+    const t = (teamsBelegt[s.uhrzeit] = teamsBelegt[s.uhrzeit] || new Set());
+    t.add(s.heimId); t.add(s.gastId);
+  });
+  neueSpiele.forEach((sp) => {
+    for (const zeit of kandidaten) {
+      const t = teamsBelegt[zeit] || new Set();
+      if (t.has(sp.heimId) || t.has(sp.gastId)) continue;
+      const f = felderBelegt[zeit] || new Set();
+      let feld = 1;
+      while (f.has(feld) && feld <= opt.anzahlFelder) feld++;
+      if (feld > opt.anzahlFelder) continue;
+      sp.uhrzeit = zeit; sp.feld = feld;
+      (felderBelegt[zeit] = felderBelegt[zeit] || new Set()).add(feld);
+      (teamsBelegt[zeit] = teamsBelegt[zeit] || new Set()).add(sp.heimId).add(sp.gastId);
+      break;
+    }
+  });
+}
+
+// Fügt eine zusätzliche Mannschaft (z. B. von der Warteliste) einer Gruppe hinzu. Es entstehen nur die neuen
+// Spiele der Mannschaft gegen die Gruppe (bei Rückrunde auch die Rückspiele); alle bestehenden Spiele bleiben.
+function gruppeMannschaftHinzufuegen(plan, teamId, gruppeId, neuerName) {
+  const neu = JSON.parse(JSON.stringify(plan));
+  const fehler = (text) => ({ plan: neu, geaendert: false, fehler: text, anzahlSpiele: 0, teamId });
+  if (neu.modus === "aufabstieg") return fehler("Im Auf- und Abstiegssystem lässt sich keine Mannschaft hinzufügen - bitte eine Mannschaft ersetzen.");
+  if (!neu.gruppen || !neu.spiele) return fehler("Dieser Spielplan hat keine Gruppen - bitte stattdessen eine Mannschaft ersetzen.");
+  if (neu.runden) return fehler("Die Endrunde ist bereits gestartet - es lässt sich keine Mannschaft mehr zu den Gruppen hinzufügen. Bitte stattdessen eine Mannschaft ersetzen.");
+  const ziel = neu.gruppen.find((g) => g.id === gruppeId);
+  if (!ziel) return fehler("Bitte eine Gruppe auswählen.");
+  let id = teamId;
+  if (!id) {
+    if (!neuerName || !neuerName.trim()) return fehler("Bitte eine Mannschaft auswählen oder einen Namen eingeben.");
+    id = neueId("ersatz");
+    neu.teamNamen = { ...(neu.teamNamen || {}), [id]: neuerName.trim() };
+  } else if (planTeamIds(neu).has(id)) {
+    return fehler("Diese Mannschaft ist bereits im Spielplan.");
+  }
+  const andere = ziel.teamIds.filter((x) => !(neu.spiele.some((s) => s.abgesagt && s.abgesagtVon === x)));
+  const beteiligt = (s, x) => s.heimId === x || s.gastId === x;
+  const zielSpiele = neu.spiele.filter((s) => s.gruppeId === ziel.id && !s.abgesagt);
+  const faktor = neu.mitRueckrunde ? 2 : 1;
+  const vollstaendig = zielSpiele.length >= ((andere.length * (andere.length - 1)) / 2) * faktor;
+  const neueSpiele = [];
+  if (vollstaendig) {
+    andere.forEach((gegner) => {
+      neueSpiele.push(neuesSpiel(id, gegner, { gruppeId: ziel.id, rueckspiel: false }));
+      if (neu.mitRueckrunde) neueSpiele.push(neuesSpiel(gegner, id, { gruppeId: ziel.id, rueckspiel: true }));
+    });
+  } else {
+    // Zufalls-Teilplan: so viele Spiele wie die Mannschaften der Gruppe im Schnitt haben, gegen die mit den wenigsten Spielen
+    const grad = {};
+    andere.forEach((x) => { grad[x] = zielSpiele.filter((s) => beteiligt(s, x)).length; });
+    const summe = andere.reduce((a, x) => a + grad[x], 0);
+    const gewuenscht = Math.min(andere.length, Math.max(1, Math.round(summe / Math.max(1, andere.length))));
+    mischen(andere).sort((a, b) => grad[a] - grad[b]).slice(0, gewuenscht).forEach((gegner) => {
+      neueSpiele.push(neuesSpiel(id, gegner, { gruppeId: ziel.id, rueckspiel: false }));
+    });
+  }
+  neueSpieleEinplanen(neu, neueSpiele);
+  neu.spiele.push(...neueSpiele);
+  ziel.teamIds = [...ziel.teamIds, id];
+  return { plan: neu, geaendert: true, fehler: null, anzahlSpiele: neueSpiele.length, teamId: id };
+}
+
+// Tauscht eine Mannschaft gegen eine andere aus, die ALLE Spiele (Gruppen, K.o., Platz 3) mit denselben
+// Uhrzeiten und Feldern übernimmt. Eine zuvor abgesagte Mannschaft ist damit vollständig ersetzt.
+// Bereits eingetragene Ergebnisse bleiben erhalten (werden der neuen Mannschaft zugerechnet).
+function mannschaftErsetzen(plan, altId, neuId, neuerName) {
+  const neu = JSON.parse(JSON.stringify(plan));
+  const fehler = (text) => ({ plan: neu, geaendert: false, fehler: text, betroffeneMitErgebnis: 0, anzahlSpiele: 0, teamId: altId });
+  const ids = planTeamIds(neu);
+  if (!ids.has(altId)) return fehler("Die zu ersetzende Mannschaft ist nicht im Spielplan.");
+  let id = neuId;
+  if (!id) {
+    if (!neuerName || !neuerName.trim()) return fehler("Bitte eine Ersatz-Mannschaft auswählen oder einen Namen eingeben.");
+    id = neueId("ersatz");
+    neu.teamNamen = { ...(neu.teamNamen || {}), [id]: neuerName.trim() };
+  } else if (ids.has(id)) {
+    return fehler("Die Ersatz-Mannschaft ist bereits im Spielplan. Zum Tauschen bitte das Auswahlfeld in der Tabelle nutzen.");
+  }
+  (neu.gruppen || []).forEach((g) => { g.teamIds = g.teamIds.map((x) => (x === altId ? id : x)); });
+  const spiele = [...(neu.spiele || []), ...(neu.runden ? neu.runden.flat() : []), ...(neu.platz3Spiel ? [neu.platz3Spiel] : [])];
+  let betroffen = 0; let anzahl = 0;
+  spiele.forEach((s) => {
+    const beteiligt = s.heimId === altId || s.gastId === altId;
+    if (s.heimId === altId) s.heimId = id;
+    if (s.gastId === altId) s.gastId = id;
+    if (s.sieger === altId) s.sieger = id;
+    if (s.abgesagtVon === altId) { delete s.abgesagt; delete s.abgesagtVon; }
+    if (beteiligt) { anzahl++; if (s.heimTore !== null && s.gastTore !== null) betroffen++; }
+  });
+  return { plan: neu, geaendert: true, fehler: null, betroffeneMitErgebnis: betroffen, anzahlSpiele: anzahl, teamId: id };
+}
+
+// Absage einer Mannschaft ohne den Plan umzubauen.
+//  - "entfaellt": Alle Gruppenspiele der Mannschaft entfallen (Uhrzeit/Feld/Spielnummer bleiben stehen, damit sich
+//    nichts verschiebt). Die Mannschaft zählt nicht mehr für Tabelle und Endrunde. Bereits eingetragene Ergebnisse
+//    dieser Mannschaft werden dabei annulliert.
+//  - "kampflos": Alle noch nicht gespielten Spiele werden 3:0 für den Gegner gewertet (bei K.o. kommt der Gegner weiter).
+function mannschaftAbsagen(plan, teamId, modus) {
+  const neu = JSON.parse(JSON.stringify(plan));
+  const fehler = (text) => ({ plan: neu, geaendert: false, fehler: text, betroffeneMitErgebnis: 0, anzahlSpiele: 0 });
+  if (!planTeamIds(neu).has(teamId)) return fehler("Die Mannschaft ist nicht im Spielplan.");
+  const hatErgebnis = (s) => s.heimTore !== null && s.gastTore !== null;
+  if (modus === "entfaellt") {
+    if (neu.modus === "aufabstieg") return fehler("Im Auf- und Abstiegssystem bitte kampflos werten oder die Mannschaft ersetzen.");
+    if (!neu.spiele || !neu.gruppen) return fehler("In diesem Spielplan bitte kampflos werten oder die Mannschaft ersetzen.");
+    if (neu.runden) return fehler("Die Endrunde ist bereits gestartet - bitte kampflos werten oder die Mannschaft ersetzen.");
+    let betroffen = 0; let anzahl = 0;
+    neu.spiele.forEach((s) => {
+      if ((s.heimId === teamId || s.gastId === teamId) && !s.abgesagt) {
+        if (hatErgebnis(s)) betroffen++;
+        s.abgesagt = true; s.abgesagtVon = teamId; s.heimTore = null; s.gastTore = null;
+        delete s.kampflos;
+        anzahl++;
+      }
+    });
+    if (anzahl === 0) return fehler("Die Mannschaft hat keine Spiele, die entfallen könnten.");
+    return { plan: neu, geaendert: true, fehler: null, betroffeneMitErgebnis: betroffen, anzahlSpiele: anzahl };
+  }
+  if (modus === "kampflos") {
+    let aktuell = neu; let anzahl = 0;
+    const kampflosIds = [];
+    const alle = () => [...(aktuell.spiele || []), ...(aktuell.runden ? aktuell.runden.flat() : []), ...(aktuell.platz3Spiel ? [aktuell.platz3Spiel] : [])];
+    const ziele = alle().filter((s) => !s.freilos && !s.abgesagt && (s.heimId === teamId || s.gastId === teamId) && s.heimId && s.gastId && !hatErgebnis(s)).map((s) => s.id);
+    ziele.forEach((spielId) => {
+      const s = alle().find((x) => x.id === spielId);
+      if (!s || hatErgebnis(s) || !s.heimId || !s.gastId) return;
+      const heimAbgesagt = s.heimId === teamId;
+      aktuell = spielplanMitErgebnis(aktuell, spielId, heimAbgesagt ? 0 : 3, heimAbgesagt ? 3 : 0, null);
+      kampflosIds.push(spielId);
+      anzahl++;
+    });
+    if (anzahl === 0) return fehler("Es gibt keine offenen Spiele dieser Mannschaft, die sich kampflos werten ließen.");
+    [...(aktuell.spiele || []), ...(aktuell.runden ? aktuell.runden.flat() : []), ...(aktuell.platz3Spiel ? [aktuell.platz3Spiel] : [])]
+      .forEach((s) => { if (kampflosIds.includes(s.id)) s.kampflos = true; });
+    return { plan: aktuell, geaendert: true, fehler: null, betroffeneMitErgebnis: 0, anzahlSpiele: anzahl };
+  }
+  return fehler("Unbekannte Aktion.");
+}
+
+// Nimmt eine Absage ("entfaellt") zurück: Die Spiele der Mannschaft zählen wieder (ohne Ergebnisse).
+function mannschaftAbsageZuruecknehmen(plan, teamId) {
+  const neu = JSON.parse(JSON.stringify(plan));
+  let anzahl = 0;
+  (neu.spiele || []).forEach((s) => {
+    if (s.abgesagt && s.abgesagtVon === teamId) { delete s.abgesagt; delete s.abgesagtVon; anzahl++; }
+  });
+  return { plan: neu, geaendert: anzahl > 0, fehler: anzahl === 0 ? "Zu dieser Mannschaft gibt es keine Absage." : null, anzahlSpiele: anzahl };
+}
+
 // Format "Gruppenphase + Halbfinale + Finale": genau 4 Mannschaften erreichen das Halbfinale.
 // Je Gruppe kommen gleich viele weiter (4 / Gruppenanzahl, abgerundet); übrige Plätze gehen an die
 // besten Nächstplatzierten (Punkte, Tordifferenz, Tore). Paarung nach Setzliste (1-4, 2-3), wobei
 // Duelle zweier Mannschaften derselben Gruppe möglichst vermieden werden.
 function halbfinalePaarungen(plan) {
   const gruppen = plan.gruppen || [];
-  const tabellen = gruppen.map((g) => berechneTabelle(g, plan.spiele));
+  const tabellen = gruppen.map((g) => berechneTabelle(g, plan.spiele).filter((r) => !r.zurueckgezogen));
   const k = tabellen.length;
   if (k === 0) return null;
   const gesamt = tabellen.reduce((a, t) => a + t.length, 0);
@@ -1357,7 +1542,7 @@ async function spielplanAlsPdfHerunterladen(plan, teams, turnier, sponsoren = []
         gy = pdfTabellenzeile(doc, x, gy, kompaktSpalten, ["Verein", "Sp", "Tore", "Pkt."], true);
         berechneTabelle(g, plan.spiele).forEach((r) => {
           gy = pdfTabellenzeile(doc, x, gy, kompaktSpalten, [
-            String(teamName(r.teamId)).slice(0, Math.max(10, Math.floor(kompaktSpalten[0] / 1.9))), r.spiele, `${r.tore}:${r.gegentore}`, r.punkte,
+            String(teamName(r.teamId) + (r.zurueckgezogen ? " (Absage)" : "")).slice(0, Math.max(10, Math.floor(kompaktSpalten[0] / 1.9))), r.spiele, `${r.tore}:${r.gegentore}`, r.punkte,
           ]);
         });
       });
@@ -1382,7 +1567,7 @@ async function spielplanAlsPdfHerunterladen(plan, teams, turnier, sponsoren = []
       y = pdfTabellenzeile(doc, 14, y, kopfSpalten, ["Nr.", "Zeit/Feld", "Gruppe", "Heim", "Erg.", "Gast"], true);
       alleGruppenspiele.forEach((s) => {
         neueZeilePruefen();
-        const ergebnis = s.heimTore !== null && s.gastTore !== null ? `${s.heimTore}:${s.gastTore}` : "– : –";
+        const ergebnis = s.abgesagt ? "entfällt" : s.heimTore !== null && s.gastTore !== null ? `${s.heimTore}:${s.gastTore}${s.kampflos ? " (k.)" : ""}` : "– : –";
         const rueck = s.rueckspiel ? " (R)" : "";
         y = pdfTabellenzeile(doc, 14, y, kopfSpalten, [
           String(spielNr[s.id] || ""), zeitFeldText(s), gruppenNameVon(s.gruppeId), teamName(s.heimId) + rueck, ergebnis, teamName(s.gastId),
@@ -3263,9 +3448,207 @@ function AnmeldeStatusKarte({ anmeldung, turnier, jetzt, alsBezahltMelden, fotoE
 
 // ---------- Admin-Ansicht ----------
 
+// Kurzfristige Änderungen am bestehenden Spielplan (nur Admin): Mannschaft hinzufügen (z. B. von der Warteliste),
+// ersetzen, absagen. Alle übrigen Spiele, Uhrzeiten, Felder und Ergebnisse bleiben unverändert.
+function MannschaftenAnpassen({ plan, teams, turnier, teamName, onPlanSpeichern, onAusWartelisteAufnehmen }) {
+  const [offen, setOffen] = useState(false);
+  const [aktion, setAktion] = useState("hinzufuegen");
+  const [teamId, setTeamId] = useState("");
+  const [gruppeId, setGruppeId] = useState("");
+  const [kandidat, setKandidat] = useState("");
+  const [neuerName, setNeuerName] = useState("");
+  const [absageModus, setAbsageModus] = useState("entfaellt");
+  const [aufnehmen, setAufnehmen] = useState(true);
+  const [meldung, setMeldung] = useState("");
+  const [erfolg, setErfolg] = useState("");
+  const [speichert, setSpeichert] = useState(false);
+
+  const imPlan = planTeamIds(plan);
+  const planTeams = [...imPlan].sort((a, b) => String(teamName(a)).localeCompare(String(teamName(b)), "de"));
+  const statusRang = { warteliste: 0, bestaetigt: 1, ausstehend: 2, zahlung_gemeldet: 2, eingegangen: 3 };
+  const kandidaten = (teams || [])
+    .filter((a) => a.turnierId === turnier.id && !imPlan.has(a.id) && statusRang[a.status] !== undefined)
+    .sort((a, b) => statusRang[a.status] - statusRang[b.status] || String(a.verein).localeCompare(String(b.verein), "de"));
+  const hinzufuegenMoeglich = !!(plan.gruppen && plan.spiele && !plan.runden && plan.modus !== "aufabstieg");
+  const gruppeGewaehlt = gruppeId || (plan.gruppen && plan.gruppen[0] ? plan.gruppen[0].id : "");
+  const kandidatStatus = (kandidaten.find((a) => a.id === kandidat) || {}).status;
+  const mitName = kandidat === "__name";
+  const kandidatId = kandidat && !mitName ? kandidat : null;
+  const abgesagteTeams = planTeams.filter((id) => (plan.spiele || []).some((s) => s.abgesagt && s.abgesagtVon === id));
+
+  const zuruecksetzen = () => { setMeldung(""); setErfolg(""); };
+
+  const ausfuehren = async () => {
+    zuruecksetzen();
+    let ergebnis;
+    if (aktion === "hinzufuegen") {
+      if (!kandidat) { setMeldung("Bitte eine Mannschaft auswählen."); return; }
+      ergebnis = gruppeMannschaftHinzufuegen(plan, kandidatId, gruppeGewaehlt, mitName ? neuerName : "");
+    } else if (aktion === "ersetzen") {
+      if (!teamId) { setMeldung("Bitte die Mannschaft wählen, die ersetzt werden soll."); return; }
+      if (!kandidat) { setMeldung("Bitte die Ersatz-Mannschaft auswählen."); return; }
+      ergebnis = mannschaftErsetzen(plan, teamId, kandidatId, mitName ? neuerName : "");
+    } else if (aktion === "absagen") {
+      if (!teamId) { setMeldung("Bitte die Mannschaft wählen, die abgesagt hat."); return; }
+      ergebnis = mannschaftAbsagen(plan, teamId, absageModus);
+    } else {
+      if (!teamId) { setMeldung("Bitte die Mannschaft wählen."); return; }
+      ergebnis = mannschaftAbsageZuruecknehmen(plan, teamId);
+    }
+    if (ergebnis.fehler) { setMeldung(ergebnis.fehler); return; }
+    if (aktion === "ersetzen" && ergebnis.betroffeneMitErgebnis > 0 &&
+        !confirm(`${ergebnis.betroffeneMitErgebnis} Spiel(e) der bisherigen Mannschaft haben schon ein Ergebnis. Es bleibt erhalten und zählt dann für die Ersatz-Mannschaft. Trotzdem ersetzen?`)) return;
+    if (aktion === "absagen" && absageModus === "entfaellt" && ergebnis.betroffeneMitErgebnis > 0 &&
+        !confirm(`${ergebnis.betroffeneMitErgebnis} Spiel(e) dieser Mannschaft haben schon ein Ergebnis. Es wird gestrichen und zählt nicht mehr in der Tabelle. Trotzdem fortfahren?`)) return;
+    setSpeichert(true);
+    const ok = await onPlanSpeichern(ergebnis.plan);
+    setSpeichert(false);
+    if (ok === false) return;
+    let zusatz = "";
+    if ((aktion === "hinzufuegen" || aktion === "ersetzen") && aufnehmen && kandidatStatus === "warteliste" && onAusWartelisteAufnehmen) {
+      await onAusWartelisteAufnehmen(kandidatId);
+      zusatz = " Die Mannschaft wurde außerdem aus der Warteliste aufgenommen (Zahlungsfrist 3 Tage).";
+    }
+    setErfolg(
+      aktion === "hinzufuegen" ? `Mannschaft hinzugefügt: ${ergebnis.anzahlSpiele} neue Spiele eingeplant, alle bisherigen Spiele und Zeiten bleiben unverändert.${zusatz}`
+      : aktion === "ersetzen" ? `Mannschaft ersetzt: ${ergebnis.anzahlSpiele} Spiele übernommen, Uhrzeiten und Felder bleiben gleich.${zusatz}`
+      : aktion === "absagen" ? (absageModus === "entfaellt" ? `Absage eingetragen: ${ergebnis.anzahlSpiele} Spiele entfallen, alle anderen Spiele und Zeiten bleiben unverändert.` : `Absage eingetragen: ${ergebnis.anzahlSpiele} Spiel(e) kampflos 3:0 für den Gegner gewertet.`)
+      : "Absage zurückgenommen - die Spiele zählen wieder."
+    );
+    setKandidat(""); setNeuerName("");
+  };
+
+  return (
+    <div className="kc-anpassen">
+      <button type="button" className="kc-btn kc-btn--sekundaer kc-btn--klein" aria-expanded={offen} onClick={() => { setOffen((v) => !v); zuruecksetzen(); }}>
+        👥 Mannschaften anpassen (hinzufügen · ersetzen · Absage) {offen ? "▴" : "▾"}
+      </button>
+      {offen && (
+        <div className="kc-anpassen__karte">
+          <p className="kc-notiz">Für kurzfristige Änderungen: Der Spielplan wird nicht neu erstellt. Bestehende Spiele, Uhrzeiten, Felder, Ergebnisse und Spielnummern bleiben, wie sie sind.</p>
+          <div className="kc-ansicht-schalter" role="tablist" aria-label="Aktion">
+            {[["hinzufuegen", "➕ Hinzufügen"], ["ersetzen", "🔁 Ersetzen"], ["absagen", "🚫 Absage"]].map(([wert, label]) => (
+              <button key={wert} type="button" role="tab" aria-selected={aktion === wert}
+                className={"kc-ansicht-schalter__knopf" + (aktion === wert ? " kc-ansicht-schalter__knopf--aktiv" : "")}
+                onClick={() => { setAktion(wert); zuruecksetzen(); }}>{label}</button>
+            ))}
+          </div>
+
+          {aktion === "hinzufuegen" && (
+            <div className="kc-formular">
+              {!hinzufuegenMoeglich ? (
+                <p className="kc-notiz">In diesem Spielplan (K.o.-System, Auf-/Abstieg oder gestartete Endrunde) lässt sich keine Mannschaft hinzufügen. Bitte stattdessen eine Mannschaft ersetzen.</p>
+              ) : (
+                <>
+                  <label className="kc-feld">
+                    <span>Mannschaft (z. B. von der Warteliste)</span>
+                    <select className="kc-input" value={kandidat} onChange={(e) => { setKandidat(e.target.value); zuruecksetzen(); }}>
+                      <option value="">– bitte wählen –</option>
+                      {kandidaten.map((a) => <option key={a.id} value={a.id}>{a.verein}{a.jugend ? ` (${a.jugend})` : ""} – {STATUS_LABEL[a.status] || a.status}</option>)}
+                      <option value="__name">Anderen Verein eintragen (Name) …</option>
+                    </select>
+                  </label>
+                  {mitName && (
+                    <label className="kc-feld"><span>Name der Mannschaft</span>
+                      <input className="kc-input" value={neuerName} onChange={(e) => setNeuerName(e.target.value)} maxLength={60} placeholder="z. B. FC Beispiel" />
+                    </label>
+                  )}
+                  {plan.gruppen.length > 1 && (
+                    <label className="kc-feld">
+                      <span>In welche Gruppe?</span>
+                      <select className="kc-input" value={gruppeGewaehlt} onChange={(e) => setGruppeId(e.target.value)}>
+                        {plan.gruppen.map((g) => <option key={g.id} value={g.id}>{g.name} ({g.teamIds.length} Mannschaften)</option>)}
+                      </select>
+                    </label>
+                  )}
+                  <p className="kc-notiz">Die Mannschaft spielt in der gewählten Gruppe gegen die anderen Teams. Die neuen Spiele werden in freie Plätze des Zeitplans gelegt, sonst hinten angehängt.</p>
+                </>
+              )}
+            </div>
+          )}
+
+          {aktion === "ersetzen" && (
+            <div className="kc-formular">
+              <label className="kc-feld">
+                <span>Welche Mannschaft fällt aus?</span>
+                <select className="kc-input" value={teamId} onChange={(e) => { setTeamId(e.target.value); zuruecksetzen(); }}>
+                  <option value="">– bitte wählen –</option>
+                  {planTeams.map((id) => <option key={id} value={id}>{teamName(id)}</option>)}
+                </select>
+              </label>
+              <label className="kc-feld">
+                <span>Wer übernimmt alle Spiele?</span>
+                <select className="kc-input" value={kandidat} onChange={(e) => { setKandidat(e.target.value); zuruecksetzen(); }}>
+                  <option value="">– bitte wählen –</option>
+                  {kandidaten.map((a) => <option key={a.id} value={a.id}>{a.verein}{a.jugend ? ` (${a.jugend})` : ""} – {STATUS_LABEL[a.status] || a.status}</option>)}
+                  <option value="__name">Anderen Verein eintragen (Name) …</option>
+                </select>
+              </label>
+              {mitName && (
+                <label className="kc-feld"><span>Name der Mannschaft</span>
+                  <input className="kc-input" value={neuerName} onChange={(e) => setNeuerName(e.target.value)} maxLength={60} placeholder="z. B. FC Beispiel" />
+                </label>
+              )}
+              <p className="kc-notiz">Die Ersatz-Mannschaft übernimmt alle Spiele mit denselben Uhrzeiten und Feldern - nichts verschiebt sich.</p>
+            </div>
+          )}
+
+          {aktion === "absagen" && (
+            <div className="kc-formular">
+              <label className="kc-feld">
+                <span>Welche Mannschaft hat abgesagt?</span>
+                <select className="kc-input" value={teamId} onChange={(e) => { setTeamId(e.target.value); zuruecksetzen(); }}>
+                  <option value="">– bitte wählen –</option>
+                  {planTeams.map((id) => <option key={id} value={id}>{teamName(id)}{abgesagteTeams.includes(id) ? " (abgesagt)" : ""}</option>)}
+                </select>
+              </label>
+              <label className="kc-checkbox-zeile">
+                <input type="radio" name="kc-absage-modus" checked={absageModus === "entfaellt"} onChange={() => setAbsageModus("entfaellt")} />
+                <span><strong>Spiele entfallen</strong> – Zeiten und Spielnummern bleiben stehen, die Mannschaft zählt nicht mehr für Tabelle und Endrunde.</span>
+              </label>
+              <label className="kc-checkbox-zeile">
+                <input type="radio" name="kc-absage-modus" checked={absageModus === "kampflos"} onChange={() => setAbsageModus("kampflos")} />
+                <span><strong>Kampflos 3:0 werten</strong> – offene Spiele gehen mit 3:0 an den Gegner (bei K.o.-Spielen kommt der Gegner weiter).</span>
+              </label>
+              {teamId && abgesagteTeams.includes(teamId) && (
+                <button type="button" className="kc-btn kc-btn--sekundaer kc-btn--klein" disabled={speichert}
+                  onClick={() => { setAktion("zuruecknehmen"); }}>
+                  Absage dieser Mannschaft zurücknehmen
+                </button>
+              )}
+            </div>
+          )}
+
+          {aktion === "zuruecknehmen" && (
+            <div className="kc-formular">
+              <p className="kc-notiz">Die Spiele von „{teamName(teamId)}“ zählen wieder (ohne Ergebnisse).</p>
+            </div>
+          )}
+
+          {(aktion === "hinzufuegen" || aktion === "ersetzen") && kandidatStatus === "warteliste" && onAusWartelisteAufnehmen && (
+            <label className="kc-checkbox-zeile">
+              <input type="checkbox" checked={aufnehmen} onChange={(e) => setAufnehmen(e.target.checked)} />
+              <span>Mannschaft zusätzlich aus der Warteliste aufnehmen (Zahlungsfrist 3 Tage, der Trainer erhält die E-Mail)</span>
+            </label>
+          )}
+
+          {meldung && <p className="kc-fehler">{meldung}</p>}
+          {erfolg && <p className="kc-hinweis kc-hinweis--erfolg">{erfolg}</p>}
+          <div className="kc-admin-aktionen">
+            <button type="button" className="kc-btn kc-btn--primary" onClick={ausfuehren} disabled={speichert || (aktion === "hinzufuegen" && !hinzufuegenMoeglich)}>
+              {speichert ? "Speichert …" : aktion === "hinzufuegen" ? "Mannschaft hinzufügen" : aktion === "ersetzen" ? "Mannschaft ersetzen" : aktion === "absagen" ? "Absage eintragen" : "Absage zurücknehmen"}
+            </button>
+            {aktion === "zuruecknehmen" && <button type="button" className="kc-btn kc-btn--sekundaer" onClick={() => setAktion("absagen")}>Zurück</button>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Zeigt einen Spielplan (Gruppenphase oder K.o.) an. Im bearbeitbaren Modus können Ergebnisse
 // eingetragen werden; sonst ist es eine reine Lese-Ansicht für Teilnehmer.
-function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern, onZeitSpeichern, onGruppeVerschieben }) {
+function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern, onZeitSpeichern, onGruppeVerschieben, onPlanSpeichern, onAusWartelisteAufnehmen }) {
   const [vereinsFilter, setVereinsFilter] = useState("");
   const [ziehTeam, setZiehTeam] = useState(null); // Mannschaft, die gerade per Drag and Drop gezogen wird
   const [dropZiel, setDropZiel] = useState(null); // "g:<gruppenId>" (verschieben) oder "t:<teamId>" (tauschen)
@@ -3289,13 +3672,14 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
     ...(plan.runden ? plan.runden.flat().filter((s) => !s.freilos) : []),
     ...(plan.platz3Spiel ? [plan.platz3Spiel] : []),
   ];
-  const trefferAnzahl = alleSpiele.filter(spielPasst).length;
+  const abgesagteAnzahl = alleSpiele.filter((x) => x.abgesagt).length;
+  const trefferAnzahl = alleSpiele.filter((x) => spielPasst(x) && !x.abgesagt).length;
   // Nächstes noch nicht gespieltes Spiel (Gruppenspiele nach Uhrzeit, danach die K.o.-Runden) - dorthin springt der Button "Nächstes Spiel".
   const naechstesSpiel = [
     ...(plan.spiele ? gruppenSpieleChronologisch(plan) : []),
     ...(plan.runden ? plan.runden.flat() : []),
     ...(plan.platz3Spiel ? [plan.platz3Spiel] : []),
-  ].find((x) => !x.freilos && x.heimId && x.gastId && (x.heimTore === null || x.gastTore === null));
+  ].find((x) => !x.freilos && !x.abgesagt && x.heimId && x.gastId && (x.heimTore === null || x.gastTore === null));
   const naechstesId = naechstesSpiel ? naechstesSpiel.id : null;
   const gruppenNameVon = {};
   (plan.gruppen || []).forEach((g) => { gruppenNameVon[g.id] = g.name; });
@@ -3392,7 +3776,7 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
                       else verschiebeAusfuehren(teamId, g.id, r.teamId);
                     } : undefined}
                   >
-                    <td>{ordnenErlaubt && <span className="kc-griff" aria-hidden="true">≡ </span>}{teamName(r.teamId)}</td>
+                    <td>{ordnenErlaubt && <span className="kc-griff" aria-hidden="true">≡ </span>}{teamName(r.teamId)}{r.zurueckgezogen && <span className="kc-spiel-marke kc-spiel-marke--abgesagt">Absage</span>}</td>
                     <td>{r.spiele}</td>
                     <td>{r.siege}</td>
                     <td>{r.unentschieden}</td>
@@ -3624,6 +4008,9 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
           )}
         </div>
       )}
+      {bearbeitbar && onPlanSpeichern && (
+        <MannschaftenAnpassen plan={plan} teams={teams} turnier={turnier} teamName={teamName} onPlanSpeichern={onPlanSpeichern} onAusWartelisteAufnehmen={onAusWartelisteAufnehmen} />
+      )}
       <div className="kc-spielplan-filter">
         <input
           className="kc-input"
@@ -3639,7 +4026,7 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
           </button>
         )}
         <span className="kc-notiz kc-spielplan-zaehler">
-          {filterBegriff !== "" ? `${trefferAnzahl} von ${gesamt} Spielen` : `${gesamt} Spiele insgesamt`}
+          {filterBegriff !== "" ? `${trefferAnzahl} von ${gesamt - abgesagteAnzahl} Spielen` : `${gesamt - abgesagteAnzahl} Spiele insgesamt`}
         </span>
       </div>
       {ordnenErlaubt && (
@@ -3701,6 +4088,23 @@ function SpielZeile({ spiel, teamName, bearbeitbar, onSpeichern, onZeitSpeichern
     );
   }
 
+  // Spiel entfällt wegen kurzfristiger Absage: Zeit, Feld und Spielnummer bleiben stehen, damit sich nichts verschiebt.
+  if (spiel.abgesagt) {
+    return (
+      <div className="kc-spiel-zeile kc-spiel-zeile--abgesagt">
+        <span className="kc-spiel-meta">
+          {nummer ? <strong className="kc-spiel-nr">Spiel {nummer}</strong> : null}
+          {nummer ? "  " : ""}
+          {gruppenName ? `${gruppenName}  ` : ""}
+          {spiel.uhrzeit ? `🕐 ${spiel.uhrzeit} Uhr${spiel.feld ? ` · Feld ${spiel.feld}` : ""}` : ""}
+        </span>
+        <span className="kc-abgesagt-text">{teamName(spiel.heimId)}</span>
+        <span className="kc-spiel-ergebnis">entfällt</span>
+        <span className="kc-abgesagt-text">{teamName(spiel.gastId)}</span>
+      </div>
+    );
+  }
+
   const speichern = () => {
     const h = Number(heim), g = Number(gast);
     if (Number.isNaN(h) || Number.isNaN(g) || heim === "" || gast === "") return;
@@ -3730,7 +4134,7 @@ function SpielZeile({ spiel, teamName, bearbeitbar, onSpeichern, onZeitSpeichern
           {nummer ? <strong className="kc-spiel-nr">Spiel {nummer}</strong> : null}
           {nummer ? "  " : ""}
           {istNaechstes ? <span className="kc-spiel-marke kc-spiel-marke--naechstes">▶ Als Nächstes  </span> : null}
-          {hatErgebnis ? <span className="kc-spiel-marke kc-spiel-marke--fertig">✓ gespielt  </span> : null}
+          {spiel.kampflos ? <span className="kc-spiel-marke kc-spiel-marke--kampflos">kampflos 3:0  </span> : hatErgebnis ? <span className="kc-spiel-marke kc-spiel-marke--fertig">✓ gespielt  </span> : null}
           {gruppenName ? `${gruppenName}  ` : ""}
           {spiel.rueckspiel ? "🔁 Rückspiel  " : ""}
           {spiel.uhrzeit ? `🕐 ${spiel.uhrzeit} Uhr${spiel.feld ? ` · Feld ${spiel.feld}` : ""}` : bearbeitbar && onZeitSpeichern ? "Uhrzeit/Feld noch nicht festgelegt" : ""}
@@ -4083,7 +4487,7 @@ function TeamNamenBearbeiten({ bestaetigteTeams, teamNamen, onSpeichern }) {
   );
 }
 
-function SpielplanVerwaltung({ turnier, anmeldungen, plan, onErstellen, onSpielSpeichern, onZeitSpeichern, onGruppeVerschieben, onEndrundeStarten, onNamenSpeichern, onNeuErstellen }) {
+function SpielplanVerwaltung({ turnier, anmeldungen, plan, onErstellen, onSpielSpeichern, onZeitSpeichern, onGruppeVerschieben, onEndrundeStarten, onNamenSpeichern, onNeuErstellen, onPlanSpeichern, onAusWartelisteAufnehmen }) {
   const bestaetigteTeams = anmeldungen.filter((a) => a.turnierId === turnier.id && a.status === "bestaetigt");
   const spielplanLink = `${window.location.origin}${window.location.pathname}?turnier=${encodeURIComponent(turnier.id)}&ansicht=spielplan`;
   const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(spielplanLink)}`;
@@ -4112,7 +4516,7 @@ function SpielplanVerwaltung({ turnier, anmeldungen, plan, onErstellen, onSpielS
 
           <TeamNamenBearbeiten bestaetigteTeams={bestaetigteTeams} teamNamen={plan.teamNamen} onSpeichern={onNamenSpeichern} />
 
-          <SpielplanAnzeige plan={plan} teams={anmeldungen} turnier={turnier} bearbeitbar onSpielSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} onGruppeVerschieben={onGruppeVerschieben} />
+          <SpielplanAnzeige plan={plan} teams={anmeldungen} turnier={turnier} bearbeitbar onSpielSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} onGruppeVerschieben={onGruppeVerschieben} onPlanSpeichern={onPlanSpeichern} onAusWartelisteAufnehmen={onAusWartelisteAufnehmen} />
 
           {endrundeAusstehend && <EndrundeStarten onEndrundeStarten={onEndrundeStarten} turnier={turnier} halbfinale={!!plan.halbfinaleFix} />}
         </>
@@ -5073,7 +5477,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
       return;
     }
     const proGruppeQualifiziert = plan.gruppen.flatMap((g) => {
-      const tabelle = berechneTabelle(g, plan.spiele);
+      const tabelle = berechneTabelle(g, plan.spiele).filter((r) => !r.zurueckgezogen);
       return tabelle.slice(0, plan.qualifiziertProGruppe || 2).map((r) => r.teamId);
     });
     if (proGruppeQualifiziert.length < 2) {
@@ -5143,6 +5547,20 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
       setSpielplaene((prev) => prev.map((p) => (p.id === plan.id ? spielplanAusDb(zeile[0]) : p)));
     } catch (e) {
       alert("Mannschaft konnte nicht verschoben werden: " + e.message);
+    }
+  };
+
+  // Speichert einen bereits berechneten, geänderten Spielplan (Mannschaft hinzufügen/ersetzen/absagen).
+  const planSpeichern = async (turnierId, neuerPlan) => {
+    const plan = spielplaene.find((p) => p.turnierId === turnierId);
+    if (!plan) return false;
+    try {
+      const zeile = await supabaseUpdate("spielplaene", plan.id, spielplanZuDb({ ...neuerPlan, id: plan.id, turnierId }), session.access_token);
+      setSpielplaene((prev) => prev.map((p) => (p.id === plan.id ? spielplanAusDb(zeile[0]) : p)));
+      return true;
+    } catch (e) {
+      alert("Änderung am Spielplan konnte nicht gespeichert werden: " + e.message);
+      return false;
     }
   };
 
@@ -5244,6 +5662,8 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
           onEndrundeStarten={(zeitOptionen) => endrundeStarten(offenerSpielplanTurnier, plan, zeitOptionen)}
           onNamenSpeichern={(teamId, name) => teamNamenSpeichern(offenerSpielplanTurnier.id, teamId, name)}
           onNeuErstellen={() => spielplanNeuErstellen(offenerSpielplanTurnier)}
+          onPlanSpeichern={(neuerPlan) => planSpeichern(offenerSpielplanTurnier.id, neuerPlan)}
+          onAusWartelisteAufnehmen={ausWartelisteAufnehmen}
         />
       </div>
     );
@@ -7512,6 +7932,12 @@ const CSS = `
 .kc-ausrichter-kachel__text strong { font-size: 17px; color: var(--kc-pitch); overflow-wrap: anywhere; }
 .kc-ausrichter-kachel__text span { font-size: 13px; color: var(--kc-muted); }
 .kc-ausrichter-kachel__pfeil { font-size: 28px; color: var(--kc-blue); line-height: 1; }
+.kc-anpassen { margin: 8px 0 12px; }
+.kc-anpassen__karte { background: var(--kc-card); border: 1px solid #E1E7EF; border-radius: 16px; padding: 16px; margin-top: 10px; box-shadow: 0 1px 3px rgba(27,42,71,0.06); }
+.kc-spiel-zeile--abgesagt { border-left: 4px solid var(--kc-red); background: #FBF3F2; color: var(--kc-muted); }
+.kc-abgesagt-text { text-decoration: line-through; }
+.kc-spiel-marke--kampflos { background: #FFF1D6; color: #8A5A00; }
+.kc-spiel-marke--abgesagt { background: #FBE3E0; color: var(--kc-red); margin-left: 6px; }
 .kc-archiv { margin-top: 18px; display: flex; flex-direction: column; gap: 16px; }
 .kc-archiv__kopf { align-self: flex-start; font-weight: 700; }
 .kc-fehler { color: var(--kc-red); font-size: 13.5px; margin-top: 8px; }
