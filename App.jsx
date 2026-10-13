@@ -18,7 +18,9 @@ function turnierFuerTeilnehmerSichtbar(turnier, jetzt) {
 }
 
 function neueId(prefix) {
-  return prefix + "_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
+  // Laufender Zähler zusätzlich zum Zufallsanteil: zwei IDs in derselben Millisekunde können nie gleich sein
+  neueId.zaehler = ((neueId.zaehler || 0) + 1) % 46656;
+  return prefix + "_" + Date.now().toString(36) + "_" + neueId.zaehler.toString(36) + Math.random().toString(36).slice(2, 7);
 }
 
 // Sorgt dafür, dass Zahlungslinks auch dann funktionieren, wenn beim Anlegen des Turniers
@@ -1060,11 +1062,24 @@ function zeitenNeuVerteilen(plan, optionen) {
   const opt = optionen || {};
   const spieldauerMin = Math.max(1, Number(opt.spieldauerMin) || (basis ? basis.spieldauerMin : 20));
   const anzahlFelder = Math.max(1, Math.floor(Number(opt.anzahlFelder) || (basis ? basis.anzahlFelder : 1)));
-  const mitZeit = offene.filter((s) => s.uhrzeit).map((s) => s.uhrzeit).sort();
+  // Planbeginn robust bestimmen (auch wenn ein Plan über Mitternacht läuft): Er liegt direkt hinter der größten Lücke
+  // zwischen allen vergebenen Uhrzeiten (im Kreis von 24 Stunden gesehen).
+  const alleMinuten = [...new Set(neu.spiele.filter((s) => s.uhrzeit).map((s) => minutenAusUhrzeit(s.uhrzeit)))].sort((x, y) => x - y);
+  let planStartMin = alleMinuten.length > 0 ? alleMinuten[0] : minutenAusUhrzeit("09:00");
+  if (alleMinuten.length > 1) {
+    let groessteLuecke = -1;
+    alleMinuten.forEach((m, i) => {
+      const naechste = i === alleMinuten.length - 1 ? alleMinuten[0] + 1440 : alleMinuten[i + 1];
+      if (naechste - m > groessteLuecke) { groessteLuecke = naechste - m; planStartMin = naechste % 1440; }
+    });
+  }
+  const ab = (uhrzeit) => (minutenAusUhrzeit(uhrzeit) - planStartMin + 1440) % 1440;
+  const mitZeit = offene.filter((s) => s.uhrzeit).map((s) => s.uhrzeit).sort((x, y) => ab(x) - ab(y));
   const startzeit = opt.startzeit || mitZeit[0] || (basis ? basis.startzeit : "09:00");
   const startMin = minutenAusUhrzeit(startzeit);
   const slotVon = (uhrzeit) => {
-    const diff = ((minutenAusUhrzeit(uhrzeit) - startMin + 720 + 1440 * 10) % 1440) - 720;
+    let diff = (minutenAusUhrzeit(uhrzeit) - startMin + 1440) % 1440;
+    if (diff > 1440 - 3 * spieldauerMin) diff -= 1440; // die letzten Slots vor dem Start zählen als davor
     return Math.round(diff / spieldauerMin);
   };
 
@@ -1078,6 +1093,14 @@ function zeitenNeuVerteilen(plan, optionen) {
     (feldFest[i] = feldFest[i] || new Set()).add(Number(s.feld) || 1);
     (teamFest[i] = teamFest[i] || new Set()).add(s.heimId).add(s.gastId);
     [s.heimId, s.gastId].forEach((id) => { (festSlots[id] = festSlots[id] || new Set()).add(i); });
+  });
+
+  // Spiele der bereits gestarteten Endrunde belegen ebenfalls ihre Plätze (kein Zusammenstoßen mit offenen Gruppenspielen)
+  [...(neu.runden ? neu.runden.flat() : []), ...(neu.platz3Spiel ? [neu.platz3Spiel] : [])].forEach((s) => {
+    if (!s.uhrzeit || s.freilos) return;
+    const i = slotVon(s.uhrzeit);
+    (feldFest[i] = feldFest[i] || new Set()).add(Number(s.feld) || 1);
+    [s.heimId, s.gastId].filter(Boolean).forEach((id) => { (teamFest[i] = teamFest[i] || new Set()).add(id); });
   });
 
   // Ein Verteil-Versuch. Strategie 0: Reihenfolge des Plans (wie beim Erstellen); 1: Mannschaften mit den meisten
@@ -3685,7 +3708,11 @@ function MannschaftenAnpassen({ plan, teams, turnier, teamName, onPlanSpeichern,
       </button>
       {offen && (
         <div className="kc-anpassen__karte">
-          <p className="kc-notiz">Für kurzfristige Änderungen: Der Spielplan wird nicht neu erstellt. Bestehende Spiele, Uhrzeiten, Felder, Ergebnisse und Spielnummern bleiben, wie sie sind.</p>
+          <p className="kc-notiz">
+            {aktion === "wuerfeln" ? "Der komplette Gruppenplan wird neu ausgelost und mit neuen Zeiten versehen."
+              : aktion === "zeiten" ? "Nur Uhrzeiten und Felder der offenen Spiele ändern sich, Begegnungen und Ergebnisse bleiben."
+              : "Für kurzfristige Änderungen: Der Spielplan wird nicht neu erstellt. Bestehende Spiele, Ergebnisse und Spielnummern bleiben, wie sie sind."}
+          </p>
           <div className="kc-ansicht-schalter" role="tablist" aria-label="Aktion">
             {[["hinzufuegen", "➕ Hinzufügen"], ["ersetzen", "🔁 Ersetzen"], ["absagen", "🚫 Absage"], ["zeiten", "🕒 Zeiten neu"], ["wuerfeln", "🎲 Neu würfeln"]].map(([wert, label]) => (
               <button key={wert} type="button" role="tab" aria-selected={aktion === wert}
@@ -3792,11 +3819,11 @@ function MannschaftenAnpassen({ plan, teams, turnier, teamName, onPlanSpeichern,
               ) : (
                 <>
                   <p className="kc-notiz">Verteilt Uhrzeiten und Felder aller <strong>{offeneSpiele} offenen Gruppenspiele</strong> neu – mit derselben Logik wie beim Erstellen des Spielplans: Spiele hintereinander werden soweit möglich vermieden, die Felder werden gleichmäßig genutzt. Paarungen, gespielte Spiele und Ergebnisse bleiben unverändert. Nutzen Sie das z. B. nach „Mannschaft hinzufügen“, „Verschieben“ oder einer Absage.</p>
-                  <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                  <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
                     <label className="kc-feld"><span>Anzahl Felder</span>
                       <input className="kc-input" type="number" min="1" max="12" value={felderEingabe} placeholder={String(zeitBasis.anzahlFelder)} onChange={(e) => setFelderEingabe(e.target.value)} />
                     </label>
-                    <label className="kc-feld"><span>Minuten pro Spiel inkl. Wechselzeit</span>
+                    <label className="kc-feld"><span>Min. pro Spiel (inkl. Wechsel)</span>
                       <input className="kc-input" type="number" min="1" max="240" value={dauerEingabe} placeholder={String(zeitBasis.spieldauerMin)} onChange={(e) => setDauerEingabe(e.target.value)} />
                     </label>
                   </div>
@@ -3812,7 +3839,7 @@ function MannschaftenAnpassen({ plan, teams, turnier, teamName, onPlanSpeichern,
               ) : (
                 <>
                   <p className="kc-notiz">Würfelt den <strong>kompletten Gruppenplan</strong> neu aus: neue Gruppen, neue Begegnungen, neue Zeiten und Felder – mit den aktuellen Mannschaften (Zugänge und Ersatz sind dabei, Mannschaften mit Absage nicht). Danach können Sie Mannschaften wie gewohnt verschieben und tauschen. <strong>Eingetragene Ergebnisse gehen verloren.</strong></p>
-                  <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                  <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
                     <label className="kc-feld"><span>Anzahl Gruppen</span>
                       <input className="kc-input" type="number" min="1" max="12" value={gruppenEingabe} placeholder={String((plan.gruppen || []).length)} onChange={(e) => setGruppenEingabe(e.target.value)} />
                     </label>
@@ -3821,7 +3848,7 @@ function MannschaftenAnpassen({ plan, teams, turnier, teamName, onPlanSpeichern,
                         <label className="kc-feld"><span>Anzahl Felder</span>
                           <input className="kc-input" type="number" min="1" max="12" value={felderEingabe} placeholder={String(zeitBasis.anzahlFelder)} onChange={(e) => setFelderEingabe(e.target.value)} />
                         </label>
-                        <label className="kc-feld"><span>Minuten pro Spiel inkl. Wechselzeit</span>
+                        <label className="kc-feld"><span>Min. pro Spiel (inkl. Wechsel)</span>
                           <input className="kc-input" type="number" min="1" max="240" value={dauerEingabe} placeholder={String(zeitBasis.spieldauerMin)} onChange={(e) => setDauerEingabe(e.target.value)} />
                         </label>
                       </>
@@ -8074,7 +8101,7 @@ const CSS = `
 .kc-code-zeile { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
 .kc-code-zeile .kc-input { flex: 1; min-width: 180px; }
 /* Spielplan: Gruppen nebeneinander, Filter, Nummerierung, Mannschaften verschieben */
-.kc-gruppen-raster { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 14px; width: min(1120px, calc(100vw - 36px)); position: relative; left: 50%; transform: translateX(-50%); }
+.kc-gruppen-raster { margin-top: 16px; display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 14px; width: min(1120px, calc(100vw - 36px)); position: relative; left: 50%; transform: translateX(-50%); }
 .kc-gruppen-raster .kc-gruppe-block { min-width: 0; overflow-x: auto; }
 .kc-gruppe-block.kc-drop-aktiv { outline: 2px dashed var(--kc-green, #2e7d32); outline-offset: -2px; }
 .kc-team-ziehbar { cursor: grab; }
