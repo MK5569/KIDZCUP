@@ -828,6 +828,8 @@ function spielplanMitZeit(plan, spielId, uhrzeit, feld) {
   if (s) {
     s.uhrzeit = uhrzeit || null;
     s.feld = feld || null;
+    // Von Hand gesetzte Zeit: wird beim "Zeiten neu verteilen" nicht angefasst
+    if (uhrzeit) s.zeitManuell = true; else delete s.zeitManuell;
   }
   return neu;
 }
@@ -881,12 +883,17 @@ function zeitOptionenAusPlan(plan) {
   const zeiten = [...new Set(mitZeit.map((s) => s.uhrzeit))].sort();
   let spieldauerMin = 20;
   if (zeiten.length > 1) {
-    let kleinste = Infinity;
+    // Häufigster Abstand zwischen zwei aufeinanderfolgenden Anstoßzeiten (robust gegen einzeln verschobene Spiele);
+    // bei Gleichstand der kleinere
+    const haeufigkeit = {};
     for (let i = 1; i < zeiten.length; i++) {
       const diff = minutenAusUhrzeit(zeiten[i]) - minutenAusUhrzeit(zeiten[i - 1]);
-      if (diff > 0 && diff < kleinste) kleinste = diff;
+      if (diff > 0) haeufigkeit[diff] = (haeufigkeit[diff] || 0) + 1;
     }
-    if (kleinste !== Infinity) spieldauerMin = kleinste;
+    let besteAnzahl = 0;
+    Object.keys(haeufigkeit).map(Number).sort((a, b) => a - b).forEach((d) => {
+      if (haeufigkeit[d] > besteAnzahl) { besteAnzahl = haeufigkeit[d]; spieldauerMin = d; }
+    });
   }
   const anzahlFelder = Math.max(1, ...mitZeit.map((s) => Number(s.feld) || 1));
   return { startzeit: addMinuten(zeiten[zeiten.length - 1], spieldauerMin), spieldauerMin, anzahlFelder };
@@ -1045,6 +1052,33 @@ function neueSpieleEinplanen(plan, neueSpiele) {
   });
 }
 
+// Zeitrahmen eines Plans: Beginn, Spieldauer (inkl. Wechselzeit), Felder und Turnierende (Ende des letzten Spiels).
+// Der Beginn wird auch bei Plänen über Mitternacht richtig erkannt (direkt hinter der größten Lücke im 24-Stunden-Kreis).
+function planZeitrahmen(plan) {
+  const alle = [...(plan.spiele || []), ...(plan.runden ? plan.runden.flat() : []), ...(plan.platz3Spiel ? [plan.platz3Spiel] : [])]
+    .filter((s) => s.uhrzeit && !s.abgesagt && !s.freilos);
+  if (alle.length === 0) return null;
+  const minuten = [...new Set(alle.map((s) => minutenAusUhrzeit(s.uhrzeit)))].sort((x, y) => x - y);
+  let startMin = minuten[0];
+  if (minuten.length > 1) {
+    let groesste = -1;
+    minuten.forEach((m, i) => {
+      const naechste = i === minuten.length - 1 ? minuten[0] + 1440 : minuten[i + 1];
+      if (naechste - m > groesste) { groesste = naechste - m; startMin = naechste % 1440; }
+    });
+  }
+  const basis = zeitOptionenAusPlan({ spiele: alle });
+  const spieldauerMin = basis ? basis.spieldauerMin : 20;
+  const rel = (u) => (minutenAusUhrzeit(u) - startMin + 1440) % 1440;
+  const letzteStartRel = Math.max(...alle.map((s) => rel(s.uhrzeit)));
+  const startzeit = addMinuten("00:00", startMin);
+  return {
+    startMin, startzeit, spieldauerMin, anzahlFelder: basis ? basis.anzahlFelder : 1,
+    letzteStartRel, endeRel: letzteStartRel + spieldauerMin,
+    letzteStartzeit: addMinuten(startzeit, letzteStartRel), endzeit: addMinuten(startzeit, letzteStartRel + spieldauerMin),
+  };
+}
+
 // Verteilt Uhrzeiten und Felder aller NOCH OFFENEN Gruppenspiele neu (wie beim ersten Erstellen des Spielplans), damit
 // keine Mannschaft hintereinander spielt und die Felder gleichmäßig genutzt werden - z. B. nachdem eine Mannschaft
 // hinzugefügt oder verschoben wurde und ihre Spiele ganz hinten angehängt wurden.
@@ -1056,23 +1090,17 @@ function zeitenNeuVerteilen(plan, optionen) {
   const fehler = (text) => ({ plan: neu, geaendert: false, fehler: text, anzahlSpiele: 0 });
   if (!neu.spiele || !neu.gruppen) return fehler("Dieser Spielplan hat keine Gruppenspiele, deren Zeiten sich neu verteilen ließen.");
   const hatErgebnis = (s) => s.heimTore !== null && s.gastTore !== null;
-  const offene = neu.spiele.filter((s) => !s.abgesagt && !hatErgebnis(s) && s.heimId && s.gastId);
+  // fest = bereits gespielt oder vom Veranstalter von Hand terminiert
+  const istFest = (s) => hatErgebnis(s) || (s.zeitManuell && s.uhrzeit);
+  const offene = neu.spiele.filter((s) => !s.abgesagt && !istFest(s) && s.heimId && s.gastId);
   if (offene.length === 0) return fehler("Es gibt keine offenen Spiele, deren Zeiten neu verteilt werden könnten.");
   const basis = zeitOptionenAusPlan(neu);
   const opt = optionen || {};
   const spieldauerMin = Math.max(1, Number(opt.spieldauerMin) || (basis ? basis.spieldauerMin : 20));
   const anzahlFelder = Math.max(1, Math.floor(Number(opt.anzahlFelder) || (basis ? basis.anzahlFelder : 1)));
-  // Planbeginn robust bestimmen (auch wenn ein Plan über Mitternacht läuft): Er liegt direkt hinter der größten Lücke
-  // zwischen allen vergebenen Uhrzeiten (im Kreis von 24 Stunden gesehen).
-  const alleMinuten = [...new Set(neu.spiele.filter((s) => s.uhrzeit).map((s) => minutenAusUhrzeit(s.uhrzeit)))].sort((x, y) => x - y);
-  let planStartMin = alleMinuten.length > 0 ? alleMinuten[0] : minutenAusUhrzeit("09:00");
-  if (alleMinuten.length > 1) {
-    let groessteLuecke = -1;
-    alleMinuten.forEach((m, i) => {
-      const naechste = i === alleMinuten.length - 1 ? alleMinuten[0] + 1440 : alleMinuten[i + 1];
-      if (naechste - m > groessteLuecke) { groessteLuecke = naechste - m; planStartMin = naechste % 1440; }
-    });
-  }
+  // Planbeginn robust bestimmen (auch bei Plänen über Mitternacht)
+  const rahmenAlt = planZeitrahmen(neu);
+  const planStartMin = rahmenAlt ? rahmenAlt.startMin : minutenAusUhrzeit("09:00");
   const ab = (uhrzeit) => (minutenAusUhrzeit(uhrzeit) - planStartMin + 1440) % 1440;
   const mitZeit = offene.filter((s) => s.uhrzeit).map((s) => s.uhrzeit).sort((x, y) => ab(x) - ab(y));
   const startzeit = opt.startzeit || mitZeit[0] || (basis ? basis.startzeit : "09:00");
@@ -1088,7 +1116,7 @@ function zeitenNeuVerteilen(plan, optionen) {
   const teamFest = {};
   const festSlots = {}; // teamId -> Slots, in denen die Mannschaft ein festes Spiel hat
   neu.spiele.forEach((s) => {
-    if (!s.uhrzeit || s.abgesagt || !hatErgebnis(s)) return;
+    if (!s.uhrzeit || s.abgesagt || !istFest(s)) return;
     const i = slotVon(s.uhrzeit);
     (feldFest[i] = feldFest[i] || new Set()).add(Number(s.feld) || 1);
     (teamFest[i] = teamFest[i] || new Set()).add(s.heimId).add(s.gastId);
@@ -1105,6 +1133,9 @@ function zeitenNeuVerteilen(plan, optionen) {
 
   // Ein Verteil-Versuch. Strategie 0: Reihenfolge des Plans (wie beim Erstellen); 1: Mannschaften mit den meisten
   // offenen Spielen zuerst; ab 2: zufällige Variationen. Ergebnis: Zuordnung je Spiel + Bewertung.
+  // Das Turnierende darf sich nicht nach hinten verschieben: Grenze = letzter Anstoß vor der Änderung (oder vorgegeben)
+  const letzterAltSlot = Math.max(...neu.spiele.filter((s) => s.uhrzeit && !s.abgesagt).map((s) => slotVon(s.uhrzeit)), 0);
+  const grenzeSlot = opt.spaetesteStartzeit ? slotVon(opt.spaetesteStartzeit) : letzterAltSlot;
   const versuch = (strategie) => {
     const gespielt = {};
     Object.keys(festSlots).forEach((id) => { gespielt[id] = new Set(festSlots[id]); });
@@ -1124,7 +1155,8 @@ function zeitenNeuVerteilen(plan, optionen) {
         if (kandidaten.length === 0) break;
         const ausgeruht = (x) => !hatSlot(x.heimId, slot - 1) && !hatSlot(x.gastId, slot - 1) && !hatSlot(x.heimId, slot + 1) && !hatSlot(x.gastId, slot + 1);
         const bevorzugt = kandidaten.filter(ausgeruht);
-        const liste = bevorzugt.length > 0 ? bevorzugt : kandidaten;
+        // jeder dritte Versuch packt ohne Pausen-Vorliebe möglichst dicht (Ende hat Vorrang)
+        const liste = bevorzugt.length > 0 && !(strategie >= 2 && strategie % 3 === 2) ? bevorzugt : kandidaten;
         let wahl = liste[0];
         if (strategie >= 1) liste.forEach((x) => { if (rest[x.heimId] + rest[x.gastId] > rest[wahl.heimId] + rest[wahl.gastId]) wahl = x; });
         uebrig.splice(uebrig.indexOf(wahl), 1);
@@ -1140,14 +1172,38 @@ function zeitenNeuVerteilen(plan, optionen) {
     }
     let hintereinander = 0;
     Object.values(gespielt).forEach((set) => { set.forEach((i) => { if (set.has(i + 1)) hintereinander++; }); });
-    return { ok: uebrig.length === 0, zuordnung, wert: hintereinander * 10000 + letzterSlot };
+    const ueberschuss = Math.max(0, letzterSlot - grenzeSlot);
+    return { ok: uebrig.length === 0, zuordnung, ueberschuss, hintereinander, wert: ueberschuss * 1000000 + hintereinander * 10000 + letzterSlot };
   };
 
   let bester = null;
-  for (let v = 0; v < 40; v++) {
+  for (let v = 0; v < 120; v++) {
     const r = versuch(v);
     if (r.ok && (!bester || r.wert < bester.wert)) bester = r;
-    if (bester && bester.wert < 10000 && v >= 2) break; // keine Mannschaft spielt hintereinander
+    if (bester && bester.ueberschuss === 0 && bester.hintereinander === 0 && v >= 2) break; // Ende eingehalten, niemand spielt hintereinander
+    if (bester && bester.ueberschuss === 0 && v >= 40) break;
+  }
+  // Der bisherige Stand ist immer eine gültige Lösung: ist er besser (Ende früher), bleibt er
+  const alt = {};
+  let altGueltig = !opt.startzeit && offene.every((x) => {
+    if (!x.uhrzeit || !(Number(x.feld) >= 1) || Number(x.feld) > anzahlFelder) return false;
+    const i = slotVon(x.uhrzeit);
+    if (i < 0 || addMinuten(startzeit, i * spieldauerMin) !== x.uhrzeit) return false;
+    // der alte Stand gilt nur, wenn er keine Felder/Mannschaften fester Spiele oder der Endrunde doppelt belegt
+    if ((feldFest[i] && feldFest[i].has(Number(x.feld))) || (teamFest[i] && (teamFest[i].has(x.heimId) || teamFest[i].has(x.gastId)))) return false;
+    alt[x.id] = { slot: i, feld: Number(x.feld) };
+    return true;
+  });
+  if (altGueltig) {
+    const gesp = {};
+    Object.keys(festSlots).forEach((id) => { gesp[id] = new Set(festSlots[id]); });
+    let letzter = 0;
+    offene.forEach((x) => { const a = alt[x.id]; letzter = Math.max(letzter, a.slot); [x.heimId, x.gastId].forEach((id) => { (gesp[id] = gesp[id] || new Set()).add(a.slot); }); });
+    let hint = 0;
+    Object.values(gesp).forEach((set) => { set.forEach((i) => { if (set.has(i + 1)) hint++; }); });
+    const ue = Math.max(0, letzter - grenzeSlot);
+    const wertAlt = ue * 1000000 + hint * 10000 + letzter;
+    if (!bester || ue < bester.ueberschuss) bester = { ok: true, zuordnung: alt, ueberschuss: ue, hintereinander: hint, wert: wertAlt };
   }
   if (!bester) return fehler("Die Zeiten konnten nicht vollständig verteilt werden.");
   offene.forEach((x) => {
@@ -1159,7 +1215,11 @@ function zeitenNeuVerteilen(plan, optionen) {
     const alt = plan.spiele.find((x) => x.id === s.id);
     return !alt || alt.uhrzeit !== s.uhrzeit || alt.feld !== s.feld;
   });
-  return { plan: neu, geaendert, fehler: null, anzahlSpiele: offene.length, optionen: { startzeit, spieldauerMin, anzahlFelder } };
+  const rahmenNeu = planZeitrahmen(neu);
+  const endeAlt = rahmenAlt ? rahmenAlt.endzeit : null;
+  const endeNeu = rahmenNeu ? rahmenNeu.endzeit : null;
+  const spaeterMin = rahmenAlt && rahmenNeu ? Math.max(0, rahmenNeu.endeRel - rahmenAlt.endeRel) : 0;
+  return { plan: neu, geaendert, fehler: null, anzahlSpiele: offene.length, optionen: { startzeit, spieldauerMin, anzahlFelder }, endeAlt, endeNeu, spaeterMin };
 }
 
 // Würfelt den Gruppenplan komplett neu aus (wie beim Erstellen): neue Zufallsgruppen, neue Begegnungen, neue Zeiten
@@ -1191,19 +1251,28 @@ function spielplanNeuWuerfeln(plan, optionen) {
   }
   const neu = { ...plan, ...erstelleGruppenplan(ids, anzahlGruppen, !!plan.mitRueckrunde, spieleProMannschaft), modus: plan.modus };
   if (plan.halbfinaleFix) neu.qualifiziertProGruppe = Math.max(1, Math.ceil(4 / Math.max(1, anzahlGruppen)));
-  const zeiten = plan.spiele.filter((s) => s.uhrzeit).map((s) => s.uhrzeit).sort();
-  const basis = zeitOptionenAusPlan(plan);
-  if (basis) {
-    neu.spiele = JSON.parse(JSON.stringify(neu.spiele));
+  const rahmen = planZeitrahmen(plan);
+  let endeNeu = null;
+  if (rahmen) {
     const zeitOpt = {
-      startzeit: opt.startzeit || zeiten[0],
-      spieldauerMin: Math.max(1, Number(opt.spieldauerMin) || basis.spieldauerMin),
-      anzahlFelder: Math.max(1, Math.floor(Number(opt.anzahlFelder) || basis.anzahlFelder)),
+      startzeit: opt.startzeit || rahmen.startzeit,
+      spieldauerMin: Math.max(1, Number(opt.spieldauerMin) || rahmen.spieldauerMin),
+      anzahlFelder: Math.max(1, Math.floor(Number(opt.anzahlFelder) || rahmen.anzahlFelder)),
+      spaetesteStartzeit: rahmen.letzteStartzeit,
     };
-    zeitenZuweisenAnListe(neu.spiele, zeitOpt);
+    const verteilt = zeitenNeuVerteilen({ ...neu, spiele: JSON.parse(JSON.stringify(neu.spiele)) }, zeitOpt);
+    if (!verteilt.fehler) {
+      neu.spiele = verteilt.plan.spiele;
+    } else {
+      neu.spiele = JSON.parse(JSON.stringify(neu.spiele));
+      zeitenZuweisenAnListe(neu.spiele, zeitOpt);
+    }
+    const rahmenNeu = planZeitrahmen(neu);
+    endeNeu = rahmenNeu ? rahmenNeu.endzeit : null;
   }
   const betroffen = aktive.filter((s) => s.heimTore !== null && s.gastTore !== null).length;
-  return { plan: neu, geaendert: true, fehler: null, anzahlSpiele: neu.spiele.length, betroffeneMitErgebnis: betroffen, anzahlGruppen, anzahlTeams: ids.length };
+  return { plan: neu, geaendert: true, fehler: null, anzahlSpiele: neu.spiele.length, betroffeneMitErgebnis: betroffen, anzahlGruppen, anzahlTeams: ids.length,
+    endeAlt: rahmen ? rahmen.endzeit : null, endeNeu, spaeterMin: rahmen && endeNeu ? Math.max(0, minutenAusUhrzeit(endeNeu) - minutenAusUhrzeit(rahmen.endzeit) + (minutenAusUhrzeit(endeNeu) < minutenAusUhrzeit(rahmen.endzeit) - 720 ? 1440 : 0)) : 0 };
 }
 
 // Fügt eine zusätzliche Mannschaft (z. B. von der Warteliste) einer Gruppe hinzu. Es entstehen nur die neuen
@@ -3651,6 +3720,7 @@ function MannschaftenAnpassen({ plan, teams, turnier, teamName, onPlanSpeichern,
   const ausfuehren = async () => {
     zuruecksetzen();
     let ergebnis;
+    const rahmenVorher = planZeitrahmen(plan);
     if (aktion === "hinzufuegen") {
       if (!kandidat) { setMeldung("Bitte eine Mannschaft auswählen."); return; }
       ergebnis = gruppeMannschaftHinzufuegen(plan, kandidatId, gruppeGewaehlt, mitName ? neuerName : "");
@@ -3672,8 +3742,15 @@ function MannschaftenAnpassen({ plan, teams, turnier, teamName, onPlanSpeichern,
     if (ergebnis.fehler) { setMeldung(ergebnis.fehler); return; }
     let neuVerteilt = false;
     if (aktion === "hinzufuegen" && neuVerteilen && zeitenMoeglich) {
-      const verteilt = zeitenNeuVerteilen(ergebnis.plan);
+      const verteilt = zeitenNeuVerteilen(ergebnis.plan, rahmenVorher ? { spaetesteStartzeit: rahmenVorher.letzteStartzeit } : undefined);
       if (!verteilt.fehler) { ergebnis = { ...ergebnis, plan: verteilt.plan }; neuVerteilt = true; }
+    }
+    if (rahmenVorher && (aktion === "hinzufuegen" || aktion === "zeiten" || aktion === "wuerfeln")) {
+      const rahmenNachher = planZeitrahmen(ergebnis.plan);
+      if (rahmenNachher && rahmenNachher.endeRel > rahmenVorher.endeRel) {
+        const grund = aktion === "zeiten" ? "weil Felder oder Spieldauer geändert wurden bzw. die Spiele nicht früher passen" : aktion === "hinzufuegen" ? "weil durch die neue Mannschaft zusätzliche Spiele dazukommen" : "weil die neue Auslosung nicht früher aufgeht";
+        if (!confirm(`ACHTUNG: Das Turnier endet danach um ${rahmenNachher.endzeit} Uhr statt um ${rahmenVorher.endzeit} Uhr (+${rahmenNachher.endeRel - rahmenVorher.endeRel} Min.), ${grund}. Tipp: mehr Felder oder kürzere Spieldauer wählen. Trotzdem fortfahren?`)) return;
+      }
     }
     if (aktion === "wuerfeln" &&
         !confirm(`Den Spielplan jetzt komplett neu würfeln? Neue Gruppen, neue Begegnungen, neue Zeiten für ${ergebnis.anzahlTeams} Mannschaften.${ergebnis.betroffeneMitErgebnis > 0 ? ` ACHTUNG: ${ergebnis.betroffeneMitErgebnis} bereits eingetragene Ergebnisse gehen verloren!` : ""}`)) return;
@@ -3692,7 +3769,7 @@ function MannschaftenAnpassen({ plan, teams, turnier, teamName, onPlanSpeichern,
     }
     setErfolg(
       aktion === "wuerfeln" ? `Spielplan neu gewürfelt: ${ergebnis.anzahlTeams} Mannschaften in ${ergebnis.anzahlGruppen} Gruppe(n), ${ergebnis.anzahlSpiele} Spiele mit neuen Zeiten. Mannschaften lassen sich jetzt wie gewohnt verschieben und tauschen.`
-      : aktion === "zeiten" ? `Zeiten neu verteilt: ${ergebnis.anzahlSpiele} offene Spiele auf ${ergebnis.optionen.anzahlFelder} Feld(er), ab ${ergebnis.optionen.startzeit} Uhr. Paarungen und Ergebnisse sind unverändert.`
+      : aktion === "zeiten" ? `Zeiten neu verteilt: ${ergebnis.anzahlSpiele} offene Spiele auf ${ergebnis.optionen.anzahlFelder} Feld(er), ab ${ergebnis.optionen.startzeit} Uhr. Paarungen und Ergebnisse sind unverändert. Von Hand geänderte Zeiten bleiben fest, das Turnierende wird nicht später.`
       : aktion === "hinzufuegen" ? (neuVerteilt ? `Mannschaft hinzugefügt: ${ergebnis.anzahlSpiele} neue Spiele eingeplant, die Zeiten der offenen Spiele wurden neu verteilt (möglichst ohne Spiele hintereinander). Ergebnisse sind unverändert.${zusatz}` : `Mannschaft hinzugefügt: ${ergebnis.anzahlSpiele} neue Spiele eingeplant, alle bisherigen Spiele und Zeiten bleiben unverändert.${zusatz}`)
       : aktion === "ersetzen" ? `Mannschaft ersetzt: ${ergebnis.anzahlSpiele} Spiele übernommen, Uhrzeiten und Felder bleiben gleich.${zusatz}`
       : aktion === "absagen" ? (absageModus === "entfaellt" ? `Absage eingetragen: ${ergebnis.anzahlSpiele} Spiele entfallen, alle anderen Spiele und Zeiten bleiben unverändert.` : `Absage eingetragen: ${ergebnis.anzahlSpiele} Spiel(e) kampflos 3:0 für den Gegner gewertet.`)
@@ -3710,7 +3787,7 @@ function MannschaftenAnpassen({ plan, teams, turnier, teamName, onPlanSpeichern,
         <div className="kc-anpassen__karte">
           <p className="kc-notiz">
             {aktion === "wuerfeln" ? "Der komplette Gruppenplan wird neu ausgelost und mit neuen Zeiten versehen."
-              : aktion === "zeiten" ? "Nur Uhrzeiten und Felder der offenen Spiele ändern sich, Begegnungen und Ergebnisse bleiben."
+              : aktion === "zeiten" ? "Nur Uhrzeiten und Felder der offenen Spiele ändern sich, Begegnungen und Ergebnisse bleiben. Von Hand geänderte Zeiten bleiben fest; das Turnierende wird nicht später (sonst gibt es eine Warnung)."
               : "Für kurzfristige Änderungen: Der Spielplan wird nicht neu erstellt. Bestehende Spiele, Ergebnisse und Spielnummern bleiben, wie sie sind."}
           </p>
           <div className="kc-ansicht-schalter" role="tablist" aria-label="Aktion">
