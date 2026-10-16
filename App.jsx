@@ -882,7 +882,14 @@ function zeitOptionenAusPlan(plan) {
   if (mitZeit.length === 0) return null;
   const zeiten = [...new Set(mitZeit.map((s) => s.uhrzeit))].sort();
   let spieldauerMin = 20;
-  if (zeiten.length > 1) {
+  // Beim Ändern gemerkte Spieldauer (dauerMin an den Spielen) hat Vorrang: nach dem Löschen von Mannschaften entstehen
+  // Lücken im Raster, aus denen sich die Dauer sonst nicht mehr sicher ablesen ließe
+  const gemerkt = {};
+  mitZeit.forEach((x) => { if (Number(x.dauerMin) > 0) gemerkt[x.dauerMin] = (gemerkt[x.dauerMin] || 0) + 1; });
+  const gemerktListe = Object.keys(gemerkt).map(Number).sort((a, b) => gemerkt[b] - gemerkt[a] || a - b);
+  if (gemerktListe.length > 0) {
+    spieldauerMin = gemerktListe[0];
+  } else if (zeiten.length > 1) {
     // Häufigster Abstand zwischen zwei aufeinanderfolgenden Anstoßzeiten (robust gegen einzeln verschobene Spiele);
     // bei Gleichstand der kleinere
     const haeufigkeit = {};
@@ -1215,6 +1222,7 @@ function zeitenNeuVerteilen(plan, optionen) {
     const alt = plan.spiele.find((x) => x.id === s.id);
     return !alt || alt.uhrzeit !== s.uhrzeit || alt.feld !== s.feld;
   });
+  neu.spiele.forEach((x) => { if (x.uhrzeit) x.dauerMin = spieldauerMin; });
   const rahmenNeu = planZeitrahmen(neu);
   const endeAlt = rahmenAlt ? rahmenAlt.endzeit : null;
   const endeNeu = rahmenNeu ? rahmenNeu.endzeit : null;
@@ -1405,6 +1413,40 @@ function mannschaftAbsageZuruecknehmen(plan, teamId) {
     if (s.abgesagt && s.abgesagtVon === teamId) { delete s.abgesagt; delete s.abgesagtVon; anzahl++; }
   });
   return { plan: neu, geaendert: anzahl > 0, fehler: anzahl === 0 ? "Zu dieser Mannschaft gibt es keine Absage." : null, anzahlSpiele: anzahl };
+}
+
+// Löscht eine Mannschaft komplett aus dem Gruppenplan: Sie verschwindet aus der Gruppe, alle ihre Spiele (auch
+// bereits abgesagte oder gespielte) werden entfernt. Alle übrigen Spiele behalten Uhrzeit, Feld und Ergebnis; die
+// Spielnummern laufen lückenlos neu durch. Ist die Gruppe danach leer, entfällt sie. Nicht möglich, sobald die
+// Endrunde gestartet ist, im K.o.-/Auf-Abstiegssystem oder wenn weniger als 2 Mannschaften übrig blieben.
+function mannschaftLoeschen(plan, teamId) {
+  const neu = JSON.parse(JSON.stringify(plan));
+  const fehler = (text) => ({ plan, geaendert: false, fehler: text, betroffeneMitErgebnis: 0, anzahlSpiele: 0 });
+  if (!neu.gruppen || !neu.spiele || (neu.modus !== "gruppen" && neu.modus !== "gruppen_ko")) return fehler("Löschen geht nur bei Gruppenplänen. Bitte stattdessen die Mannschaft ersetzen oder kampflos werten.");
+  if (neu.runden) return fehler("Die Endrunde ist bereits gestartet - die Mannschaft lässt sich nicht mehr löschen. Bitte stattdessen ersetzen oder kampflos werten.");
+  if (!planTeamIds(neu).has(teamId)) return fehler("Die Mannschaft ist nicht im Spielplan.");
+  const gruppe = neu.gruppen.find((g) => g.teamIds.includes(teamId));
+  const gesamtTeams = neu.gruppen.reduce((a, g) => a + g.teamIds.length, 0);
+  if (gesamtTeams <= 2) return fehler("Es müssen mindestens 2 Mannschaften im Spielplan bleiben.");
+  // Spieldauer vor dem Löschen festhalten, damit das Zeitraster trotz Lücken eindeutig bleibt
+  const basisZeit = zeitOptionenAusPlan(neu);
+  if (basisZeit) neu.spiele.forEach((s) => { if (s.uhrzeit && !(Number(s.dauerMin) > 0)) s.dauerMin = basisZeit.spieldauerMin; });
+  let betroffen = 0; let anzahl = 0;
+  neu.spiele = neu.spiele.filter((s) => {
+    if (s.heimId !== teamId && s.gastId !== teamId) return true;
+    anzahl++;
+    if (s.heimTore !== null && s.gastTore !== null && !s.abgesagt) betroffen++;
+    return false;
+  });
+  let gruppeEntfernt = false;
+  neu.gruppen.forEach((g) => { g.teamIds = g.teamIds.filter((x) => x !== teamId); });
+  if (gruppe && gruppe.teamIds.length === 0) {
+    neu.gruppen = neu.gruppen.filter((g) => g.id !== gruppe.id);
+    gruppeEntfernt = true;
+    if (neu.halbfinaleFix) neu.qualifiziertProGruppe = Math.max(1, Math.ceil(4 / Math.max(1, neu.gruppen.length)));
+  }
+  const rest = gruppe && !gruppeEntfernt ? neu.gruppen.find((g) => g.id === gruppe.id).teamIds.length : 0;
+  return { plan: neu, geaendert: true, fehler: null, betroffeneMitErgebnis: betroffen, anzahlSpiele: anzahl, gruppeName: gruppe ? gruppe.name : "", restInGruppe: rest, gruppeEntfernt };
 }
 
 // Format "Gruppenphase + Halbfinale + Finale": genau 4 Mannschaften erreichen das Halbfinale.
@@ -3692,6 +3734,7 @@ function MannschaftenAnpassen({ plan, teams, turnier, teamName, onPlanSpeichern,
   const [absageModus, setAbsageModus] = useState("entfaellt");
   const [aufnehmen, setAufnehmen] = useState(true);
   const [neuVerteilen, setNeuVerteilen] = useState(true);
+  const [luckenSchliessen, setLuckenSchliessen] = useState(false);
   const [felderEingabe, setFelderEingabe] = useState("");
   const [dauerEingabe, setDauerEingabe] = useState("");
   const [gruppenEingabe, setGruppenEingabe] = useState("");
@@ -3710,6 +3753,7 @@ function MannschaftenAnpassen({ plan, teams, turnier, teamName, onPlanSpeichern,
   const kandidatStatus = (kandidaten.find((a) => a.id === kandidat) || {}).status;
   const mitName = kandidat === "__name";
   const kandidatId = kandidat && !mitName ? kandidat : null;
+  const loeschenMoeglich = !!(plan.gruppen && plan.spiele && !plan.runden && (plan.modus === "gruppen" || plan.modus === "gruppen_ko"));
   const abgesagteTeams = planTeams.filter((id) => (plan.spiele || []).some((s) => s.abgesagt && s.abgesagtVon === id));
 
   const zuruecksetzen = () => { setMeldung(""); setErfolg(""); };
@@ -3731,6 +3775,9 @@ function MannschaftenAnpassen({ plan, teams, turnier, teamName, onPlanSpeichern,
     } else if (aktion === "absagen") {
       if (!teamId) { setMeldung("Bitte die Mannschaft wählen, die abgesagt hat."); return; }
       ergebnis = mannschaftAbsagen(plan, teamId, absageModus);
+    } else if (aktion === "loeschen") {
+      if (!teamId) { setMeldung("Bitte die Mannschaft wählen, die gelöscht werden soll."); return; }
+      ergebnis = mannschaftLoeschen(plan, teamId);
     } else if (aktion === "zeiten") {
       ergebnis = zeitenNeuVerteilen(plan, { anzahlFelder: felderEingabe, spieldauerMin: dauerEingabe });
     } else if (aktion === "wuerfeln") {
@@ -3752,6 +3799,15 @@ function MannschaftenAnpassen({ plan, teams, turnier, teamName, onPlanSpeichern,
         if (!confirm(`ACHTUNG: Das Turnier endet danach um ${rahmenNachher.endzeit} Uhr statt um ${rahmenVorher.endzeit} Uhr (+${rahmenNachher.endeRel - rahmenVorher.endeRel} Min.), ${grund}. Tipp: mehr Felder oder kürzere Spieldauer wählen. Trotzdem fortfahren?`)) return;
       }
     }
+    let luckenZu = false;
+    if (aktion === "loeschen") {
+      const text = `„${teamName(teamId)}“ jetzt komplett aus dem Spielplan löschen? ${ergebnis.anzahlSpiele} Spiel(e) werden entfernt.${ergebnis.betroffeneMitErgebnis > 0 ? ` ACHTUNG: ${ergebnis.betroffeneMitErgebnis} bereits eingetragene Ergebnisse gehen verloren, die Tabelle ändert sich.` : ""}${ergebnis.gruppeEntfernt ? ` Die Gruppe ${ergebnis.gruppeName} ist danach leer und entfällt.` : ergebnis.restInGruppe <= 2 ? ` In ${ergebnis.gruppeName} bleiben nur ${ergebnis.restInGruppe} Mannschaft(en).` : ""} Das lässt sich nicht rückgängig machen.`;
+      if (!confirm(text)) return;
+      if (luckenSchliessen && zeitenMoeglich) {
+        const v = zeitenNeuVerteilen(ergebnis.plan, rahmenVorher ? { spaetesteStartzeit: rahmenVorher.letzteStartzeit } : undefined);
+        if (!v.fehler) { ergebnis = { ...ergebnis, plan: v.plan }; luckenZu = true; }
+      }
+    }
     if (aktion === "wuerfeln" &&
         !confirm(`Den Spielplan jetzt komplett neu würfeln? Neue Gruppen, neue Begegnungen, neue Zeiten für ${ergebnis.anzahlTeams} Mannschaften.${ergebnis.betroffeneMitErgebnis > 0 ? ` ACHTUNG: ${ergebnis.betroffeneMitErgebnis} bereits eingetragene Ergebnisse gehen verloren!` : ""}`)) return;
     if (aktion === "ersetzen" && ergebnis.betroffeneMitErgebnis > 0 &&
@@ -3768,7 +3824,8 @@ function MannschaftenAnpassen({ plan, teams, turnier, teamName, onPlanSpeichern,
       zusatz = " Die Mannschaft wurde außerdem aus der Warteliste aufgenommen (Zahlungsfrist 3 Tage).";
     }
     setErfolg(
-      aktion === "wuerfeln" ? `Spielplan neu gewürfelt: ${ergebnis.anzahlTeams} Mannschaften in ${ergebnis.anzahlGruppen} Gruppe(n), ${ergebnis.anzahlSpiele} Spiele mit neuen Zeiten. Mannschaften lassen sich jetzt wie gewohnt verschieben und tauschen.`
+      aktion === "loeschen" ? `Mannschaft gelöscht: ${ergebnis.anzahlSpiele} Spiel(e) entfernt. ${luckenZu ? "Die Zeiten der offenen Spiele wurden neu verteilt (Lücken geschlossen)." : "Alle übrigen Spiele behalten Uhrzeit, Feld und Ergebnis."} Spielnummern laufen neu durch.`
+      : aktion === "wuerfeln" ? `Spielplan neu gewürfelt: ${ergebnis.anzahlTeams} Mannschaften in ${ergebnis.anzahlGruppen} Gruppe(n), ${ergebnis.anzahlSpiele} Spiele mit neuen Zeiten. Mannschaften lassen sich jetzt wie gewohnt verschieben und tauschen.`
       : aktion === "zeiten" ? `Zeiten neu verteilt: ${ergebnis.anzahlSpiele} offene Spiele auf ${ergebnis.optionen.anzahlFelder} Feld(er), ab ${ergebnis.optionen.startzeit} Uhr. Paarungen und Ergebnisse sind unverändert. Von Hand geänderte Zeiten bleiben fest, das Turnierende wird nicht später.`
       : aktion === "hinzufuegen" ? (neuVerteilt ? `Mannschaft hinzugefügt: ${ergebnis.anzahlSpiele} neue Spiele eingeplant, die Zeiten der offenen Spiele wurden neu verteilt (möglichst ohne Spiele hintereinander). Ergebnisse sind unverändert.${zusatz}` : `Mannschaft hinzugefügt: ${ergebnis.anzahlSpiele} neue Spiele eingeplant, alle bisherigen Spiele und Zeiten bleiben unverändert.${zusatz}`)
       : aktion === "ersetzen" ? `Mannschaft ersetzt: ${ergebnis.anzahlSpiele} Spiele übernommen, Uhrzeiten und Felder bleiben gleich.${zusatz}`
@@ -3776,22 +3833,24 @@ function MannschaftenAnpassen({ plan, teams, turnier, teamName, onPlanSpeichern,
       : "Absage zurückgenommen - die Spiele zählen wieder."
     );
     setKandidat(""); setNeuerName("");
+    if (aktion === "loeschen") setTeamId("");
   };
 
   return (
     <div className="kc-anpassen">
       <button type="button" className="kc-btn kc-btn--sekundaer kc-btn--klein" aria-expanded={offen} onClick={() => { setOffen((v) => !v); zuruecksetzen(); }}>
-        👥 Mannschaften anpassen (hinzufügen · ersetzen · Absage · neu würfeln) {offen ? "▴" : "▾"}
+        👥 Mannschaften anpassen (hinzufügen · ersetzen · löschen · Absage · neu würfeln) {offen ? "▴" : "▾"}
       </button>
       {offen && (
         <div className="kc-anpassen__karte">
           <p className="kc-notiz">
             {aktion === "wuerfeln" ? "Der komplette Gruppenplan wird neu ausgelost und mit neuen Zeiten versehen."
+              : aktion === "loeschen" ? "Die Mannschaft wird mit allen ihren Spielen entfernt. Die übrigen Spiele behalten Zeiten, Felder und Ergebnisse."
               : aktion === "zeiten" ? "Nur Uhrzeiten und Felder der offenen Spiele ändern sich, Begegnungen und Ergebnisse bleiben. Von Hand geänderte Zeiten bleiben fest; das Turnierende wird nicht später (sonst gibt es eine Warnung)."
               : "Für kurzfristige Änderungen: Der Spielplan wird nicht neu erstellt. Bestehende Spiele, Ergebnisse und Spielnummern bleiben, wie sie sind."}
           </p>
           <div className="kc-ansicht-schalter" role="tablist" aria-label="Aktion">
-            {[["hinzufuegen", "➕ Hinzufügen"], ["ersetzen", "🔁 Ersetzen"], ["absagen", "🚫 Absage"], ["zeiten", "🕒 Zeiten neu"], ["wuerfeln", "🎲 Neu würfeln"]].map(([wert, label]) => (
+            {[["hinzufuegen", "➕ Hinzufügen"], ["ersetzen", "🔁 Ersetzen"], ["absagen", "🚫 Absage"], ["loeschen", "🗑 Löschen"], ["zeiten", "🕒 Zeiten neu"], ["wuerfeln", "🎲 Neu würfeln"]].map(([wert, label]) => (
               <button key={wert} type="button" role="tab" aria-selected={aktion === wert}
                 className={"kc-ansicht-schalter__knopf" + (aktion === wert ? " kc-ansicht-schalter__knopf--aktiv" : "")}
                 onClick={() => { setAktion(wert); zuruecksetzen(); }}>{label}</button>
@@ -3889,6 +3948,31 @@ function MannschaftenAnpassen({ plan, teams, turnier, teamName, onPlanSpeichern,
             </div>
           )}
 
+          {aktion === "loeschen" && (
+            <div className="kc-formular">
+              {!loeschenMoeglich ? (
+                <p className="kc-notiz">In diesem Spielplan (K.o.-System, Auf-/Abstieg oder gestartete Endrunde) lässt sich keine Mannschaft löschen. Bitte stattdessen ersetzen oder kampflos werten.</p>
+              ) : (
+                <>
+                  <label className="kc-feld">
+                    <span>Welche Mannschaft soll gelöscht werden?</span>
+                    <select className="kc-input" value={teamId} onChange={(e) => { setTeamId(e.target.value); zuruecksetzen(); }}>
+                      <option value="">– bitte wählen –</option>
+                      {planTeams.map((id) => <option key={id} value={id}>{teamName(id)}{abgesagteTeams.includes(id) ? " (abgesagt)" : ""}</option>)}
+                    </select>
+                  </label>
+                  <p className="kc-notiz">Die Mannschaft wird <strong>komplett aus dem Spielplan entfernt</strong>, mit allen ihren Spielen. Alle anderen Spiele behalten Uhrzeit, Feld und Ergebnis, die Spielnummern laufen neu durch. Eingetragene Ergebnisse der gelöschten Mannschaft gehen verloren. Die Anmeldung selbst bleibt bestehen; die Mannschaft kann später wieder hinzugefügt werden.</p>
+                  {zeitenMoeglich && (
+                    <label className="kc-checkbox-zeile">
+                      <input type="checkbox" checked={luckenSchliessen} onChange={(e) => setLuckenSchliessen(e.target.checked)} />
+                      <span>Lücken schließen: Zeiten der offenen Spiele neu verteilen (Turnierende wird dabei nicht später). Ohne Haken bleiben alle Zeiten stehen.</span>
+                    </label>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
           {aktion === "zeiten" && (
             <div className="kc-formular">
               {!zeitenMoeglich ? (
@@ -3952,8 +4036,8 @@ function MannschaftenAnpassen({ plan, teams, turnier, teamName, onPlanSpeichern,
           {meldung && <p className="kc-fehler">{meldung}</p>}
           {erfolg && <p className="kc-hinweis kc-hinweis--erfolg">{erfolg}</p>}
           <div className="kc-admin-aktionen">
-            <button type="button" className="kc-btn kc-btn--primary" onClick={ausfuehren} disabled={speichert || (aktion === "hinzufuegen" && !hinzufuegenMoeglich) || (aktion === "zeiten" && !zeitenMoeglich)}>
-              {speichert ? "Speichert …" : aktion === "wuerfeln" ? "Spielplan neu würfeln" : aktion === "zeiten" ? "Zeiten neu verteilen" : aktion === "hinzufuegen" ? "Mannschaft hinzufügen" : aktion === "ersetzen" ? "Mannschaft ersetzen" : aktion === "absagen" ? "Absage eintragen" : "Absage zurücknehmen"}
+            <button type="button" className="kc-btn kc-btn--primary" onClick={ausfuehren} disabled={speichert || (aktion === "hinzufuegen" && !hinzufuegenMoeglich) || (aktion === "loeschen" && !loeschenMoeglich) || (aktion === "zeiten" && !zeitenMoeglich)}>
+              {speichert ? "Speichert …" : aktion === "wuerfeln" ? "Spielplan neu würfeln" : aktion === "zeiten" ? "Zeiten neu verteilen" : aktion === "hinzufuegen" ? "Mannschaft hinzufügen" : aktion === "ersetzen" ? "Mannschaft ersetzen" : aktion === "loeschen" ? "Mannschaft löschen" : aktion === "absagen" ? "Absage eintragen" : "Absage zurücknehmen"}
             </button>
             {aktion === "zuruecknehmen" && <button type="button" className="kc-btn kc-btn--sekundaer" onClick={() => setAktion("absagen")}>Zurück</button>}
           </div>
