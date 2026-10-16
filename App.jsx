@@ -5107,6 +5107,11 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
   // dort würde der Link sonst für jeden Besucher sichtbar.
   const [whatsappGruppen, setWhatsappGruppen] = useState({});
   const [offeneWhatsapp, setOffeneWhatsapp] = useState(() => new Set());
+  // Check-in (Mannschaften vor Ort) und Schiedsrichter je Turnier - eigene, nur für Admins lesbare Tabellen
+  const [checkins, setCheckins] = useState({}); // { [anmeldungId]: { am, von } }
+  const [schiedsrichter, setSchiedsrichter] = useState([]);
+  const [checkinVerfuegbar, setCheckinVerfuegbar] = useState(true);
+  const [offeneCheckin, setOffeneCheckin] = useState(() => new Set());
 
   const [zeigeFormular, setZeigeFormular] = useState(false);
   const [bearbeitetesTurnier, setBearbeitetesTurnier] = useState(null);
@@ -5274,6 +5279,18 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
         setWhatsappGruppen(map);
       } catch (e) {
         console.warn("WhatsApp-Gruppen konnten nicht geladen werden:", e.message);
+      }
+      try {
+        const ciZeilen = await supabaseSelect("anmeldung_checkins", "?select=*", session.access_token);
+        const srZeilen = await supabaseSelect("turnier_schiedsrichter", "?select=*&order=name.asc", session.access_token);
+        const map = {};
+        ciZeilen.forEach((c) => { map[c.anmeldung_id] = { am: c.eingecheckt_am ? new Date(c.eingecheckt_am).getTime() : Date.now(), von: c.eingecheckt_von || "" }; });
+        setCheckins(map);
+        setSchiedsrichter(srZeilen.map(schiedsrichterAusDb));
+        setCheckinVerfuegbar(true);
+      } catch (e) {
+        console.warn("Check-in/Schiedsrichter konnten nicht geladen werden:", e.message);
+        setCheckinVerfuegbar(false);
       }
     })();
     // Bewusst nicht von "session" selbst abhängig: Bei der automatischen Token-Erneuerung soll nicht neu
@@ -5493,9 +5510,18 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
       alert("Turnier konnte nicht gelöscht werden: " + e.message);
       return;
     }
+    // Check-in-Daten und Schiedsrichter des Turniers mitlöschen (eigene Tabellen ohne Verknüpfung; Fehler hier stoppen nichts)
+    try {
+      const idsDesTurniers = anmeldungen.filter((a) => a.turnierId === id).map((a) => a.id);
+      await supabaseDeleteWhere("turnier_schiedsrichter", `?turnier_id=eq.${encodeURIComponent(id)}`, session.access_token);
+      for (const aid of idsDesTurniers) await supabaseDeleteWhere("anmeldung_checkins", `?anmeldung_id=eq.${encodeURIComponent(aid)}`, session.access_token);
+    } catch (e) {
+      console.warn("Check-in-Daten konnten nicht mitgelöscht werden:", e.message);
+    }
     setTurniere((prev) => prev.filter((t) => t.id !== id));
     setAnmeldungen((prev) => prev.filter((a) => a.turnierId !== id)); // DB löscht per on-delete-cascade mit
     setSpielplaene((prev) => prev.filter((p) => p.turnierId !== id));
+    setSchiedsrichter((prev) => prev.filter((x) => x.turnierId !== id));
     if (offeneTurniere.has(id)) {
       setOffeneTurniere((prev) => {
         const next = new Set(prev);
@@ -5671,6 +5697,65 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     }
   };
 
+  // Check-in einer Mannschaft (vor Ort ja/nein)
+  const mannschaftCheckin = async (anmeldungId, an) => {
+    try {
+      if (an) {
+        const jetztIso = new Date().toISOString();
+        const zeile = await supabaseUpsert("anmeldung_checkins", { anmeldung_id: anmeldungId, eingecheckt_am: jetztIso, eingecheckt_von: adminProfil.name || "" }, "anmeldung_id", session.access_token);
+        const c = zeile[0] || {};
+        setCheckins((prev) => ({ ...prev, [anmeldungId]: { am: c.eingecheckt_am ? new Date(c.eingecheckt_am).getTime() : Date.now(), von: c.eingecheckt_von || adminProfil.name || "" } }));
+      } else {
+        await supabaseDeleteWhere("anmeldung_checkins", `?anmeldung_id=eq.${encodeURIComponent(anmeldungId)}`, session.access_token);
+        setCheckins((prev) => { const kopie = { ...prev }; delete kopie[anmeldungId]; return kopie; });
+      }
+    } catch (e) {
+      alert("Check-in konnte nicht gespeichert werden: " + e.message);
+    }
+  };
+
+  // Schiedsrichter anlegen oder ändern. Rückgabe: { ok } oder { fehler }
+  const schiedsrichterSpeichern = async (turnierId, daten) => {
+    const pruef = schiedsrichterPruefen(schiedsrichter, turnierId, daten.name, daten.kennung, daten.id || null);
+    if (pruef.fehler) return { fehler: pruef.fehler };
+    try {
+      if (daten.id) {
+        const zeile = await supabaseUpdate("turnier_schiedsrichter", daten.id, { name: pruef.name, kennung: pruef.kennung }, session.access_token);
+        const neu = schiedsrichterAusDb(zeile[0]);
+        setSchiedsrichter((prev) => prev.map((x) => (x.id === neu.id ? neu : x)));
+      } else {
+        const zeile = await supabaseInsert("turnier_schiedsrichter", {
+          id: neueId("sr"), turnier_id: turnierId, name: pruef.name, kennung: pruef.kennung,
+          erstellt_am: new Date().toISOString(), erstellt_von: adminProfil.name || "",
+        }, session.access_token);
+        setSchiedsrichter((prev) => [...prev, schiedsrichterAusDb(zeile[0])]);
+      }
+      return { ok: true };
+    } catch (e) {
+      return { fehler: "Schiedsrichter konnte nicht gespeichert werden: " + e.message };
+    }
+  };
+
+  const schiedsrichterCheckin = async (id, an) => {
+    try {
+      const zeile = await supabaseUpdate("turnier_schiedsrichter", id, an ? { eingecheckt_am: new Date().toISOString(), eingecheckt_von: adminProfil.name || "" } : { eingecheckt_am: null, eingecheckt_von: null }, session.access_token);
+      const neu = schiedsrichterAusDb(zeile[0]);
+      setSchiedsrichter((prev) => prev.map((x) => (x.id === neu.id ? neu : x)));
+    } catch (e) {
+      alert("Check-in konnte nicht gespeichert werden: " + e.message);
+    }
+  };
+
+  const schiedsrichterLoeschen = async (sr) => {
+    if (!confirm(`Schiedsrichter „${sr.name}“ (Kennung ${sr.kennung}) wirklich entfernen?`)) return;
+    try {
+      await supabaseDelete("turnier_schiedsrichter", sr.id, session.access_token);
+      setSchiedsrichter((prev) => prev.filter((x) => x.id !== sr.id));
+    } catch (e) {
+      alert("Schiedsrichter konnte nicht gelöscht werden: " + e.message);
+    }
+  };
+
   // Speichert (oder entfernt bei leerem Feld) den WhatsApp-Gruppenlink eines Turniers.
   const whatsappGruppeSpeichern = async (turnierId, link) => {
     const bereinigt = (link || "").trim();
@@ -5803,6 +5888,8 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
       console.warn("Löschprotokoll konnte nicht gespeichert werden:", e.message);
     }
     try {
+      await supabaseDeleteWhere("anmeldung_checkins", `?anmeldung_id=eq.${encodeURIComponent(anmeldung.id)}`, session.access_token).catch(() => {});
+      setCheckins((prev) => { const kopie = { ...prev }; delete kopie[anmeldung.id]; return kopie; });
       await supabaseDelete("anmeldungen", anmeldung.id, session.access_token);
       setAnmeldungen((prev) => prev.filter((a) => a.id !== anmeldung.id));
       belegungNeuLaden();
@@ -5816,6 +5903,10 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     const betroffen = anmeldungen.filter((a) => a.turnierId === turnier.id).length;
     if (!confirm(`Alle ${betroffen} Anmeldung(en) zu "${turnier.name}" (${formatDatum(turnier.datum)}) endgültig löschen? Das Turnier selbst (ohne personenbezogene Daten) bleibt erhalten.`)) return;
     try {
+      // Schiedsrichter-Namen und Check-ins sind personenbezogen und gehören zu den Altdaten
+      await supabaseDeleteWhere("turnier_schiedsrichter", `?turnier_id=eq.${turnier.id}`, session.access_token).catch(() => {});
+      for (const a of anmeldungen.filter((x) => x.turnierId === turnier.id)) await supabaseDeleteWhere("anmeldung_checkins", `?anmeldung_id=eq.${encodeURIComponent(a.id)}`, session.access_token).catch(() => {});
+      setSchiedsrichter((prev) => prev.filter((x) => x.turnierId !== turnier.id));
       await supabaseDeleteWhere("anmeldungen", `?turnier_id=eq.${turnier.id}`, session.access_token);
       await supabaseDeleteWhere("spielplaene", `?turnier_id=eq.${turnier.id}`, session.access_token);
       setAnmeldungen((prev) => prev.filter((a) => a.turnierId !== turnier.id));
@@ -6454,6 +6545,16 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                 >
                   💬 WhatsApp-Gruppe{whatsappGruppen[t.id] ? " ✓" : ""}
                 </button>
+                <button
+                  role="menuitem" className="kc-menue__eintrag"
+                  onClick={() => setOffeneCheckin((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(t.id)) next.delete(t.id); else next.add(t.id);
+                    return next;
+                  })}
+                >
+                  ✅ Check-in &amp; Schiedsrichter{checkinVerfuegbar ? ` (${bestaetigteRegs.filter((a) => checkins[a.id]).length}/${bestaetigteRegs.length})` : ""}
+                </button>
                 <button role="menuitem" className="kc-menue__eintrag kc-menue__eintrag--gefahr" onClick={() => turnierLoeschen(t.id)}>Löschen</button>
                 </AdminMenue>
               </div>
@@ -6482,6 +6583,20 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                   weitereRegs={[...neueRegs, ...bearbeiteteRegs]}
                   onSpeichern={(link) => whatsappGruppeSpeichern(t.id, link)}
                   onEinladungenSenden={(liste, fortschritt) => whatsappEinladungenVersenden(t, liste, fortschritt)}
+                />
+              )}
+
+              {offeneCheckin.has(t.id) && (
+                <CheckInPanel
+                  turnier={t}
+                  mannschaften={bestaetigteRegs}
+                  checkins={checkins}
+                  schiedsrichter={schiedsrichter.filter((x) => x.turnierId === t.id)}
+                  verfuegbar={checkinVerfuegbar}
+                  onMannschaftCheckin={mannschaftCheckin}
+                  onSchiedsrichterSpeichern={(daten) => schiedsrichterSpeichern(t.id, daten)}
+                  onSchiedsrichterCheckin={schiedsrichterCheckin}
+                  onSchiedsrichterLoeschen={schiedsrichterLoeschen}
                 />
               )}
 
@@ -6826,6 +6941,159 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
 }
 
 const WHATSAPP_GRUPPEN_PREFIX = "https://chat.whatsapp.com/";
+
+// ---------- Check-in & Schiedsrichter ----------
+
+// Kennung (z. B. Schiedsrichter-Ausweisnummer) vergleichbar machen: Leerzeichen vereinheitlichen, Großbuchstaben
+function kennungNormalisieren(kennung) {
+  return String(kennung || "").trim().replace(/\s+/g, " ").toUpperCase();
+}
+
+function schiedsrichterAusDb(z) {
+  return {
+    id: z.id, turnierId: z.turnier_id, name: z.name || "", kennung: z.kennung || "",
+    eingechecktAm: z.eingecheckt_am ? new Date(z.eingecheckt_am).getTime() : null,
+    eingechecktVon: z.eingecheckt_von || "",
+  };
+}
+
+// Prüft die Eingabe eines Schiedsrichters: Name und Kennung Pflicht, Kennung je Turnier nur einmal.
+// Rückgabe: { fehler: string|null, name, kennung } (bereinigt)
+function schiedsrichterPruefen(liste, turnierId, name, kennung, eigeneId) {
+  const n = String(name || "").trim().replace(/\s+/g, " ");
+  const k = String(kennung || "").trim().replace(/\s+/g, " ");
+  if (n.length < 2) return { fehler: "Bitte den Namen des Schiedsrichters eintragen.", name: n, kennung: k };
+  if (n.length > 80) return { fehler: "Der Name ist zu lang (höchstens 80 Zeichen).", name: n, kennung: k };
+  if (k.length < 1) return { fehler: "Bitte die Kennung des Schiedsrichters eintragen.", name: n, kennung: k };
+  if (k.length > 40) return { fehler: "Die Kennung ist zu lang (höchstens 40 Zeichen).", name: n, kennung: k };
+  const doppelt = (liste || []).find((x) => x.turnierId === turnierId && x.id !== eigeneId && kennungNormalisieren(x.kennung) === kennungNormalisieren(k));
+  if (doppelt) return { fehler: `Die Kennung ${k} ist bei diesem Turnier schon vergeben (${doppelt.name}).`, name: n, kennung: k };
+  return { fehler: null, name: n, kennung: k };
+}
+
+// Zahlen für die Kopfzeile: wie viele sind schon vor Ort?
+function checkinUebersicht(mannschaften, checkins, schiedsrichter) {
+  const ci = checkins || {};
+  const teamsDa = (mannschaften || []).filter((a) => ci[a.id]).length;
+  const srDa = (schiedsrichter || []).filter((x) => x.eingechecktAm).length;
+  return { teamsDa, teamsGesamt: (mannschaften || []).length, srDa, srGesamt: (schiedsrichter || []).length };
+}
+
+// Filter für die Listen: "alle" | "da" | "fehlt" plus Suchbegriff (Teilwort, Groß-/Kleinschreibung egal)
+function checkinFiltern(liste, filter, begriff, istDa, suchtext) {
+  const b = String(begriff || "").trim().toLowerCase();
+  return (liste || []).filter((x) => {
+    if (filter === "da" && !istDa(x)) return false;
+    if (filter === "fehlt" && istDa(x)) return false;
+    return b === "" || suchtext(x).toLowerCase().includes(b);
+  });
+}
+
+function CheckInPanel({ turnier, mannschaften, checkins, schiedsrichter, verfuegbar, onMannschaftCheckin, onSchiedsrichterSpeichern, onSchiedsrichterCheckin, onSchiedsrichterLoeschen }) {
+  const [filter, setFilter] = useState("alle");
+  const [suche, setSuche] = useState("");
+  const [name, setName] = useState("");
+  const [kennung, setKennung] = useState("");
+  const [bearbeiteId, setBearbeiteId] = useState(null);
+  const [meldung, setMeldung] = useState("");
+  const [speichert, setSpeichert] = useState(false);
+
+  const uebersicht = checkinUebersicht(mannschaften, checkins, schiedsrichter);
+  const teamsSortiert = [...mannschaften].sort((a, b) => String(a.verein).localeCompare(String(b.verein), "de"));
+  const teamsListe = checkinFiltern(teamsSortiert, filter, suche, (a) => !!checkins[a.id], (a) => `${a.verein} ${a.jugend || ""} ${a.trainer || ""}`);
+  const srSortiert = [...schiedsrichter].sort((a, b) => String(a.name).localeCompare(String(b.name), "de"));
+  const srListe = checkinFiltern(srSortiert, filter, suche, (x) => !!x.eingechecktAm, (x) => `${x.name} ${x.kennung}`);
+  const uhrzeit = (ts) => new Date(ts).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
+
+  const abbrechenBearbeiten = () => { setBearbeiteId(null); setName(""); setKennung(""); setMeldung(""); };
+  const speichern = async () => {
+    setMeldung("");
+    setSpeichert(true);
+    const ergebnis = await onSchiedsrichterSpeichern({ id: bearbeiteId, name, kennung });
+    setSpeichert(false);
+    if (ergebnis && ergebnis.fehler) { setMeldung(ergebnis.fehler); return; }
+    if (ergebnis && ergebnis.ok) abbrechenBearbeiten();
+  };
+
+  if (!verfuegbar) {
+    return (
+      <div className="kc-checkin-panel">
+        <p className="kc-fehler">
+          Check-in und Schiedsrichter sind noch nicht freigeschaltet: Die zugehörigen Datenbank-Tabellen fehlen oder sind nicht erreichbar.
+          Bitte einmalig die SQL-Datei von HaYuTech in Supabase ausführen und die Seite neu laden.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="kc-checkin-panel">
+      <div className="kc-checkin-kopf">
+        <div className="kc-checkin-zahl"><strong>{uebersicht.teamsDa}</strong> von {uebersicht.teamsGesamt}<span>Mannschaften vor Ort</span></div>
+        <div className="kc-checkin-zahl"><strong>{uebersicht.srDa}</strong> von {uebersicht.srGesamt}<span>Schiedsrichter vor Ort</span></div>
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", margin: "10px 0" }}>
+        {[["alle", "Alle"], ["da", "✅ Vor Ort"], ["fehlt", "⏳ Noch nicht da"]].map(([wert, label]) => (
+          <button key={wert} type="button" className={"kc-btn kc-btn--klein " + (filter === wert ? "kc-btn--primary" : "kc-btn--sekundaer")} aria-pressed={filter === wert} onClick={() => setFilter(wert)}>{label}</button>
+        ))}
+        <input className="kc-input" style={{ flex: "1 1 160px", minWidth: 140 }} value={suche} onChange={(e) => setSuche(e.target.value)} placeholder="Suchen (Verein, Name, Kennung) …" aria-label="Suchen" />
+      </div>
+
+      <h3 className="kc-h3">Mannschaften</h3>
+      {mannschaften.length === 0 && <p className="kc-notiz">Noch keine bestätigten Mannschaften.</p>}
+      {mannschaften.length > 0 && teamsListe.length === 0 && <p className="kc-notiz">Keine Mannschaft für diesen Filter.</p>}
+      {teamsListe.map((a) => {
+        const ci = checkins[a.id];
+        return (
+          <div className={"kc-checkin-zeile" + (ci ? " kc-checkin-zeile--da" : "")} key={a.id}>
+            <div>
+              <strong>{a.verein}</strong>{a.jugend ? ` (${a.jugend})` : ""}
+              <div className="kc-notiz">{ci ? `✅ Vor Ort seit ${uhrzeit(ci.am)} Uhr${ci.von ? ` · eingecheckt von ${ci.von}` : ""}` : "⏳ Noch nicht eingecheckt"}{a.trainer ? ` · Trainer: ${a.trainer}` : ""}</div>
+            </div>
+            <button type="button" className={"kc-btn kc-btn--klein " + (ci ? "kc-btn--sekundaer" : "kc-btn--primary")} onClick={() => onMannschaftCheckin(a.id, !ci)}>
+              {ci ? "Rückgängig" : "Einchecken"}
+            </button>
+          </div>
+        );
+      })}
+
+      <h3 className="kc-h3" style={{ marginTop: 16 }}>Schiedsrichter</h3>
+      <div className="kc-formular kc-checkin-formular">
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+          <label className="kc-feld" style={{ flex: "2 1 180px" }}><span>Name</span>
+            <input className="kc-input" value={name} maxLength={80} onChange={(e) => setName(e.target.value)} placeholder="Vor- und Nachname" />
+          </label>
+          <label className="kc-feld" style={{ flex: "1 1 140px" }}><span>Kennung</span>
+            <input className="kc-input" value={kennung} maxLength={40} onChange={(e) => setKennung(e.target.value)} placeholder="z. B. Ausweis-Nr." />
+          </label>
+          <button type="button" className="kc-btn kc-btn--primary" disabled={speichert} onClick={speichern}>
+            {speichert ? "Speichert …" : bearbeiteId ? "Änderung speichern" : "+ Schiedsrichter eintragen"}
+          </button>
+          {bearbeiteId && <button type="button" className="kc-btn kc-btn--sekundaer" onClick={abbrechenBearbeiten}>Abbrechen</button>}
+        </div>
+        {meldung && <p className="kc-fehler">{meldung}</p>}
+      </div>
+      {schiedsrichter.length === 0 && <p className="kc-notiz">Noch keine Schiedsrichter eingetragen.</p>}
+      {schiedsrichter.length > 0 && srListe.length === 0 && <p className="kc-notiz">Kein Schiedsrichter für diesen Filter.</p>}
+      {srListe.map((x) => (
+        <div className={"kc-checkin-zeile" + (x.eingechecktAm ? " kc-checkin-zeile--da" : "")} key={x.id}>
+          <div>
+            <strong>{x.name}</strong> · Kennung {x.kennung}
+            <div className="kc-notiz">{x.eingechecktAm ? `✅ Vor Ort seit ${uhrzeit(x.eingechecktAm)} Uhr${x.eingechecktVon ? ` · eingecheckt von ${x.eingechecktVon}` : ""}` : "⏳ Noch nicht eingecheckt"}</div>
+          </div>
+          <div className="kc-admin-aktionen kc-admin-aktionen--klein">
+            <button type="button" className={"kc-btn kc-btn--klein " + (x.eingechecktAm ? "kc-btn--sekundaer" : "kc-btn--primary")} onClick={() => onSchiedsrichterCheckin(x.id, !x.eingechecktAm)}>
+              {x.eingechecktAm ? "Rückgängig" : "Einchecken"}
+            </button>
+            <button type="button" className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => { setBearbeiteId(x.id); setName(x.name); setKennung(x.kennung); setMeldung(""); }}>Bearbeiten</button>
+            <button type="button" className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => onSchiedsrichterLoeschen(x)}>Löschen</button>
+          </div>
+        </div>
+      ))}
+      <p className="kc-notiz" style={{ marginTop: 10 }}>Nur für Admins sichtbar. Die Daten von {turnier.name} werden beim Löschen des Turniers oder der Altdaten mit entfernt.</p>
+    </div>
+  );
+}
 
 function whatsappGruppeAusDb(g) {
   return {
@@ -8199,6 +8467,14 @@ const CSS = `
 .kc-bestaetigt-block { background: #F0F8F3; border: 1.5px solid var(--kc-green); border-radius: 10px; padding: 10px 12px 4px; margin-bottom: 4px; display: flex; flex-direction: column; gap: 12px; }
 .kc-vcf-hinweis { background: #FCF3DC; border: 1.5px solid #E0A100; border-radius: 10px; padding: 12px 14px; margin-top: 10px; }
 .kc-vcf-hinweis p { margin: 0 0 10px; font-size: 13px; color: #7A5A00; line-height: 1.5; }
+.kc-checkin-panel { background: #F2F7FC; border: 1.5px solid #C5D9EE; border-radius: 10px; padding: 12px 14px; margin-top: 10px; }
+.kc-checkin-kopf { display: flex; gap: 12px; flex-wrap: wrap; }
+.kc-checkin-zahl { flex: 1 1 160px; background: #fff; border-radius: 8px; padding: 8px 12px; font-size: 15px; }
+.kc-checkin-zahl strong { font-size: 24px; color: #073567; margin-right: 4px; }
+.kc-checkin-zahl span { display: block; font-size: 12px; color: #6B7075; }
+.kc-checkin-zeile { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; background: #fff; border-radius: 8px; padding: 8px 12px; margin-bottom: 6px; border-left: 4px solid #D0D5DA; }
+.kc-checkin-zeile--da { border-left-color: #2E9E57; background: #F2FBF5; }
+.kc-checkin-formular { margin-bottom: 8px; }
 .kc-whatsapp-panel { background: #EEF8F0; border: 1.5px solid #B9DFC2; border-radius: 10px; padding: 12px 14px; margin-top: 10px; }
 .kc-whatsapp-anleitung { margin: 0 0 10px; padding-left: 20px; font-size: 13px; line-height: 1.5; }
 .kc-whatsapp-link { background: #fff; border-radius: 8px; padding: 8px 10px; font-size: 13px; word-break: break-all; }
