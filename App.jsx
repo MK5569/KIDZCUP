@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { jsPDF } from "jspdf";
 
 // Logo als Data-URI eingebettet, damit die App als eigenständige Datei funktioniert
@@ -5280,18 +5280,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
       } catch (e) {
         console.warn("WhatsApp-Gruppen konnten nicht geladen werden:", e.message);
       }
-      try {
-        const ciZeilen = await supabaseSelect("anmeldung_checkins", "?select=*", session.access_token);
-        const srZeilen = await supabaseSelect("turnier_schiedsrichter", "?select=*&order=name.asc", session.access_token);
-        const map = {};
-        ciZeilen.forEach((c) => { map[c.anmeldung_id] = { am: c.eingecheckt_am ? new Date(c.eingecheckt_am).getTime() : Date.now(), von: c.eingecheckt_von || "" }; });
-        setCheckins(map);
-        setSchiedsrichter(srZeilen.map(schiedsrichterAusDb));
-        setCheckinVerfuegbar(true);
-      } catch (e) {
-        console.warn("Check-in/Schiedsrichter konnten nicht geladen werden:", e.message);
-        setCheckinVerfuegbar(false);
-      }
+      if (!(await checkinNeuLaden(session.access_token))) setCheckinVerfuegbar(false);
     })();
     // Bewusst nicht von "session" selbst abhängig: Bei der automatischen Token-Erneuerung soll nicht neu
     // geladen werden (sonst würde die Ansicht kurz auf "Lädt ..." springen und offene Formulare verwerfen).
@@ -5697,6 +5686,23 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
     }
   };
 
+  // Lädt Check-ins und Schiedsrichter neu (auch von anderen Admins am Eingang eingetragene). Gibt true zurück, wenn es geklappt hat.
+  async function checkinNeuLaden(token) {
+    try {
+      const ciZeilen = await supabaseSelect("anmeldung_checkins", "?select=*", token);
+      const srZeilen = await supabaseSelect("turnier_schiedsrichter", "?select=*&order=name.asc", token);
+      const map = {};
+      ciZeilen.forEach((c) => { map[c.anmeldung_id] = { am: c.eingecheckt_am ? new Date(c.eingecheckt_am).getTime() : Date.now(), von: c.eingecheckt_von || "" }; });
+      setCheckins(map);
+      setSchiedsrichter(srZeilen.map(schiedsrichterAusDb));
+      setCheckinVerfuegbar(true);
+      return true;
+    } catch (e) {
+      console.warn("Check-in/Schiedsrichter konnten nicht geladen werden:", e.message);
+      return false;
+    }
+  }
+
   // Check-in einer Mannschaft (vor Ort ja/nein)
   const mannschaftCheckin = async (anmeldungId, an) => {
     try {
@@ -5732,6 +5738,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
       }
       return { ok: true };
     } catch (e) {
+      if (/duplicate|23505|unique/i.test(String(e.message))) return { fehler: `Die Kennung ${pruef.kennung} ist bei diesem Turnier schon vergeben.` };
       return { fehler: "Schiedsrichter konnte nicht gespeichert werden: " + e.message };
     }
   };
@@ -6593,6 +6600,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                   checkins={checkins}
                   schiedsrichter={schiedsrichter.filter((x) => x.turnierId === t.id)}
                   verfuegbar={checkinVerfuegbar}
+                  onAktualisieren={() => checkinNeuLaden(session.access_token)}
                   onMannschaftCheckin={mannschaftCheckin}
                   onSchiedsrichterSpeichern={(daten) => schiedsrichterSpeichern(t.id, daten)}
                   onSchiedsrichterCheckin={schiedsrichterCheckin}
@@ -6989,7 +6997,7 @@ function checkinFiltern(liste, filter, begriff, istDa, suchtext) {
   });
 }
 
-function CheckInPanel({ turnier, mannschaften, checkins, schiedsrichter, verfuegbar, onMannschaftCheckin, onSchiedsrichterSpeichern, onSchiedsrichterCheckin, onSchiedsrichterLoeschen }) {
+function CheckInPanel({ turnier, mannschaften, checkins, schiedsrichter, verfuegbar, onAktualisieren, onMannschaftCheckin, onSchiedsrichterSpeichern, onSchiedsrichterCheckin, onSchiedsrichterLoeschen }) {
   const [filter, setFilter] = useState("alle");
   const [suche, setSuche] = useState("");
   const [name, setName] = useState("");
@@ -6997,6 +7005,23 @@ function CheckInPanel({ turnier, mannschaften, checkins, schiedsrichter, verfueg
   const [bearbeiteId, setBearbeiteId] = useState(null);
   const [meldung, setMeldung] = useState("");
   const [speichert, setSpeichert] = useState(false);
+  const [aktualisiert, setAktualisiert] = useState(null); // Zeitpunkt der letzten Aktualisierung
+  const [laedt, setLaedt] = useState(false);
+  // Aktuellste Aktualisieren-Funktion merken, damit der Zeitgeber nie mit veraltetem Token arbeitet
+  const formularRef = useRef(null);
+  const aktualisierenRef = useRef(onAktualisieren);
+  aktualisierenRef.current = onAktualisieren;
+  const neuLaden = async () => {
+    setLaedt(true);
+    const ok = await aktualisierenRef.current();
+    setLaedt(false);
+    if (ok) setAktualisiert(Date.now());
+  };
+  // Alle 30 Sekunden automatisch nachladen, solange der Bereich offen und die Seite sichtbar ist
+  useEffect(() => {
+    const id = setInterval(() => { if (typeof document === "undefined" || document.visibilityState !== "hidden") aktualisierenRef.current(); }, 30000);
+    return () => clearInterval(id);
+  }, []);
 
   const uebersicht = checkinUebersicht(mannschaften, checkins, schiedsrichter);
   const teamsSortiert = [...mannschaften].sort((a, b) => String(a.verein).localeCompare(String(b.verein), "de"));
@@ -7036,6 +7061,7 @@ function CheckInPanel({ turnier, mannschaften, checkins, schiedsrichter, verfueg
         {[["alle", "Alle"], ["da", "✅ Vor Ort"], ["fehlt", "⏳ Noch nicht da"]].map(([wert, label]) => (
           <button key={wert} type="button" className={"kc-btn kc-btn--klein " + (filter === wert ? "kc-btn--primary" : "kc-btn--sekundaer")} aria-pressed={filter === wert} onClick={() => setFilter(wert)}>{label}</button>
         ))}
+        <button type="button" className="kc-btn kc-btn--sekundaer kc-btn--klein" disabled={laedt} onClick={neuLaden} title="Holt den aktuellen Stand, z. B. wenn ein anderer Admin eingecheckt hat">{laedt ? "Lädt …" : "🔄 Aktualisieren"}</button>
         <input className="kc-input" style={{ flex: "1 1 160px", minWidth: 140 }} value={suche} onChange={(e) => setSuche(e.target.value)} placeholder="Suchen (Verein, Name, Kennung) …" aria-label="Suchen" />
       </div>
 
@@ -7058,7 +7084,8 @@ function CheckInPanel({ turnier, mannschaften, checkins, schiedsrichter, verfueg
       })}
 
       <h3 className="kc-h3" style={{ marginTop: 16 }}>Schiedsrichter</h3>
-      <div className="kc-formular kc-checkin-formular">
+      <div className="kc-formular kc-checkin-formular" ref={formularRef}>
+        {bearbeiteId && <p className="kc-notiz"><strong>Eintrag wird bearbeitet:</strong> Name und Kennung korrigieren, dann „Änderung speichern“. Der Check-in-Status bleibt erhalten.</p>}
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
           <label className="kc-feld" style={{ flex: "2 1 180px" }}><span>Name</span>
             <input className="kc-input" value={name} maxLength={80} onChange={(e) => setName(e.target.value)} placeholder="Vor- und Nachname" />
@@ -7085,12 +7112,12 @@ function CheckInPanel({ turnier, mannschaften, checkins, schiedsrichter, verfueg
             <button type="button" className={"kc-btn kc-btn--klein " + (x.eingechecktAm ? "kc-btn--sekundaer" : "kc-btn--primary")} onClick={() => onSchiedsrichterCheckin(x.id, !x.eingechecktAm)}>
               {x.eingechecktAm ? "Rückgängig" : "Einchecken"}
             </button>
-            <button type="button" className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => { setBearbeiteId(x.id); setName(x.name); setKennung(x.kennung); setMeldung(""); }}>Bearbeiten</button>
+            <button type="button" className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => { setBearbeiteId(x.id); setName(x.name); setKennung(x.kennung); setMeldung(""); if (formularRef.current && formularRef.current.scrollIntoView) formularRef.current.scrollIntoView({ block: "center", behavior: "smooth" }); }}>Bearbeiten</button>
             <button type="button" className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => onSchiedsrichterLoeschen(x)}>Löschen</button>
           </div>
         </div>
       ))}
-      <p className="kc-notiz" style={{ marginTop: 10 }}>Nur für Admins sichtbar. Die Daten von {turnier.name} werden beim Löschen des Turniers oder der Altdaten mit entfernt.</p>
+      <p className="kc-notiz" style={{ marginTop: 10 }}>{aktualisiert ? `Zuletzt aktualisiert um ${uhrzeit(aktualisiert)} Uhr. ` : ""}Der Stand wird alle 30 Sekunden automatisch aktualisiert. Nur für Admins sichtbar. Die Daten von {turnier.name} werden beim Löschen des Turniers oder der Altdaten mit entfernt.</p>
     </div>
   );
 }
