@@ -673,9 +673,11 @@ function addMinuten(basiszeit, minuten) {
 
 // Kernfunktion: verteilt Uhrzeit + Feld auf eine flache Liste von Spielen (mutiert sie direkt),
 // bevorzugt pro "Zeitrunde" Paarungen, bei denen beide Teams seit mind. einer Runde pausiert haben.
-function zeitenZuweisenAnListe(spiele, optionen) {
+function zeitenZuweisenKern(spiele, optionen, gruppenWechsel) {
   const { startzeit, spieldauerMin, anzahlFelder } = optionen;
   const letzteRunde = {};
+  const teamRunden = {};
+  const gruppeLetzte = {}; // Gruppe -> Zeitrunde, in der sie zuletzt gespielt hat (Gruppen wechseln sich ab)
   let rundenIndex = 0;
   const unassigned = [...spiele];
 
@@ -683,17 +685,27 @@ function zeitenZuweisenAnListe(spiele, optionen) {
     const belegteTeams = new Set();
     let feldZaehler = 0;
     let inDieserRundeVergeben = false;
+    // Reihenfolge der Gruppen für diese Zeitrunde: die Gruppe, die am längsten pausiert, kommt zuerst; bei Gleichstand die mit mehr offenen Spielen
+    const offenJeGruppe = {};
+    unassigned.forEach((s) => { offenJeGruppe[s.gruppeId] = (offenJeGruppe[s.gruppeId] || 0) + 1; });
+    const gruppenReihe = gruppenWechsel ? Object.keys(offenJeGruppe).sort((a, b) => (gruppeLetzte[a] ?? -2) - (gruppeLetzte[b] ?? -2) || offenJeGruppe[b] - offenJeGruppe[a]) : [];
 
     while (feldZaehler < anzahlFelder && unassigned.length > 0) {
-      let index = unassigned.findIndex((s) => {
-        if (belegteTeams.has(s.heimId) || belegteTeams.has(s.gastId)) return false;
-        const hLetzte = letzteRunde[s.heimId] ?? -2;
-        const gLetzte = letzteRunde[s.gastId] ?? -2;
-        return hLetzte < rundenIndex - 1 && gLetzte < rundenIndex - 1;
-      });
-      if (index === -1) {
-        index = unassigned.findIndex((s) => !belegteTeams.has(s.heimId) && !belegteTeams.has(s.gastId));
+      const frei = (s) => !belegteTeams.has(s.heimId) && !belegteTeams.has(s.gastId);
+      const ausgeruht = (s) => (letzteRunde[s.heimId] ?? -2) < rundenIndex - 1 && (letzteRunde[s.gastId] ?? -2) < rundenIndex - 1;
+      let index = -1;
+      for (const g of gruppenReihe) {
+        index = unassigned.findIndex((s) => String(s.gruppeId) === g && frei(s) && ausgeruht(s));
+        if (index !== -1) break;
       }
+      if (index === -1) index = unassigned.findIndex((s) => frei(s) && ausgeruht(s));
+      if (index === -1) {
+        for (const g of gruppenReihe) {
+          index = unassigned.findIndex((s) => String(s.gruppeId) === g && frei(s));
+          if (index !== -1) break;
+        }
+      }
+      if (index === -1) index = unassigned.findIndex(frei);
       if (index === -1) break;
 
       const spiel = unassigned.splice(index, 1)[0];
@@ -701,6 +713,8 @@ function zeitenZuweisenAnListe(spiele, optionen) {
       belegteTeams.add(spiel.gastId);
       letzteRunde[spiel.heimId] = rundenIndex;
       letzteRunde[spiel.gastId] = rundenIndex;
+      gruppeLetzte[spiel.gruppeId] = rundenIndex;
+      [spiel.heimId, spiel.gastId].forEach((id) => { (teamRunden[id] = teamRunden[id] || new Set()).add(rundenIndex); });
       spiel.feld = feldZaehler + 1;
       spiel.uhrzeit = addMinuten(startzeit, rundenIndex * spieldauerMin);
       feldZaehler++;
@@ -709,6 +723,23 @@ function zeitenZuweisenAnListe(spiele, optionen) {
 
     if (!inDieserRundeVergeben) break; // Sicherheitsbremse gegen Endlosschleife
     rundenIndex++;
+  }
+  let hintereinander = 0;
+  Object.values(teamRunden).forEach((set) => set.forEach((i) => { if (set.has(i + 1)) hintereinander++; }));
+  return { runden: rundenIndex, hintereinander };
+}
+
+// Verteilt Uhrzeit + Feld. Die Gruppen spielen abwechselnd (ein paar Spiele Gruppe A, dann ein paar Gruppe B, ...),
+// damit möglichst jede Mannschaft zwischen zwei Spielen pausiert. Ist die abwechselnde Variante länger oder hat
+// mehr Spiele hintereinander als die klassische Reihenfolge, gilt die klassische (Turnierende hat Vorrang).
+function zeitenZuweisenAnListe(spiele, optionen) {
+  const gruppen = new Set(spiele.map((s) => s.gruppeId));
+  if (gruppen.size < 2) { zeitenZuweisenKern(spiele, optionen, false); return; }
+  const kopie = spiele.map((s) => ({ ...s }));
+  const k1 = zeitenZuweisenKern(kopie, optionen, true);
+  const k0 = zeitenZuweisenKern(spiele, optionen, false);
+  if (k1.runden <= k0.runden && k1.hintereinander <= k0.hintereinander) {
+    spiele.forEach((s, i) => { s.uhrzeit = kopie[i].uhrzeit; s.feld = kopie[i].feld; });
   }
 }
 
@@ -1143,7 +1174,7 @@ function zeitenNeuVerteilen(plan, optionen) {
   // Das Turnierende darf sich nicht nach hinten verschieben: Grenze = letzter Anstoß vor der Änderung (oder vorgegeben)
   const letzterAltSlot = Math.max(...neu.spiele.filter((s) => s.uhrzeit && !s.abgesagt).map((s) => slotVon(s.uhrzeit)), 0);
   const grenzeSlot = opt.spaetesteStartzeit ? slotVon(opt.spaetesteStartzeit) : letzterAltSlot;
-  const versuch = (strategie) => {
+  const versuch = (strategie, wechsel) => {
     const gespielt = {};
     Object.keys(festSlots).forEach((id) => { gespielt[id] = new Set(festSlots[id]); });
     const hatSlot = (id, i) => !!(gespielt[id] && gespielt[id].has(i));
@@ -1151,8 +1182,14 @@ function zeitenNeuVerteilen(plan, optionen) {
     const rest = {};
     uebrig.forEach((s) => { rest[s.heimId] = (rest[s.heimId] || 0) + 1; rest[s.gastId] = (rest[s.gastId] || 0) + 1; });
     const zuordnung = {};
+    // Gruppen wechseln sich ab: Gruppe, die zuletzt am längsten nicht gespielt hat, bekommt zuerst die Felder
+    const gruppeLetzte = {};
+    neu.spiele.forEach((s) => { if (s.uhrzeit && !s.abgesagt && istFest(s)) gruppeLetzte[s.gruppeId] = Math.max(gruppeLetzte[s.gruppeId] ?? -9, slotVon(s.uhrzeit)); });
     let slot = 0; let leer = 0; let letzterSlot = 0;
     while (uebrig.length > 0 && slot < 3000) {
+      const offenJeGruppe = {};
+      uebrig.forEach((x) => { offenJeGruppe[x.gruppeId] = (offenJeGruppe[x.gruppeId] || 0) + 1; });
+      const gruppenReihe = !wechsel ? [] : Object.keys(offenJeGruppe).sort((g1, g2) => (gruppeLetzte[g1] ?? -9) - (gruppeLetzte[g2] ?? -9) || offenJeGruppe[g2] - offenJeGruppe[g1]);
       const teamsJetzt = new Set(teamFest[slot] || []);
       const felder = feldFest[slot] || new Set();
       let vergeben = false;
@@ -1163,11 +1200,13 @@ function zeitenNeuVerteilen(plan, optionen) {
         const ausgeruht = (x) => !hatSlot(x.heimId, slot - 1) && !hatSlot(x.gastId, slot - 1) && !hatSlot(x.heimId, slot + 1) && !hatSlot(x.gastId, slot + 1);
         const bevorzugt = kandidaten.filter(ausgeruht);
         // jeder dritte Versuch packt ohne Pausen-Vorliebe möglichst dicht (Ende hat Vorrang)
-        const liste = bevorzugt.length > 0 && !(strategie >= 2 && strategie % 3 === 2) ? bevorzugt : kandidaten;
+        let liste = bevorzugt.length > 0 && !(strategie >= 2 && strategie % 3 === 2) ? bevorzugt : kandidaten;
+        for (const g of gruppenReihe) { const teil = liste.filter((x) => String(x.gruppeId) === g); if (teil.length > 0) { liste = teil; break; } }
         let wahl = liste[0];
         if (strategie >= 1) liste.forEach((x) => { if (rest[x.heimId] + rest[x.gastId] > rest[wahl.heimId] + rest[wahl.gastId]) wahl = x; });
         uebrig.splice(uebrig.indexOf(wahl), 1);
         zuordnung[wahl.id] = { slot, feld };
+        gruppeLetzte[wahl.gruppeId] = slot;
         teamsJetzt.add(wahl.heimId).add(wahl.gastId);
         rest[wahl.heimId]--; rest[wahl.gastId]--;
         [wahl.heimId, wahl.gastId].forEach((id) => { (gespielt[id] = gespielt[id] || new Set()).add(slot); });
@@ -1185,8 +1224,11 @@ function zeitenNeuVerteilen(plan, optionen) {
 
   let bester = null;
   for (let v = 0; v < 120; v++) {
-    const r = versuch(v);
-    if (r.ok && (!bester || r.wert < bester.wert)) bester = r;
+    // erst mit abwechselnden Gruppen, dann klassisch: abwechselnd gewinnt bei Gleichstand, klassisch nur wenn es das Ende früher bringt oder weniger Hintereinander
+    [true, false].forEach((wechsel) => {
+      const r = versuch(v, wechsel);
+      if (r.ok && (!bester || r.wert < bester.wert)) bester = r;
+    });
     if (bester && bester.ueberschuss === 0 && bester.hintereinander === 0 && v >= 2) break; // Ende eingehalten, niemand spielt hintereinander
     if (bester && bester.ueberschuss === 0 && v >= 40) break;
   }
@@ -1447,6 +1489,72 @@ function mannschaftLoeschen(plan, teamId) {
   }
   const rest = gruppe && !gruppeEntfernt ? neu.gruppen.find((g) => g.id === gruppe.id).teamIds.length : 0;
   return { plan: neu, geaendert: true, fehler: null, betroffeneMitErgebnis: betroffen, anzahlSpiele: anzahl, gruppeName: gruppe ? gruppe.name : "", restInGruppe: rest, gruppeEntfernt };
+}
+
+const QUALI_LABEL = { weiter: "✅ weiter", sicher: "✅ sicher weiter", moeglich: "⏳ offen", raus: "✖ raus" };
+
+// Live-Stand der Endrunden-Qualifikation ("Gruppen + Endrunde"), solange die Endrunde noch nicht gestartet ist.
+// Je Mannschaft: "weiter" (Gruppe fertig, qualifiziert), "sicher" (kann nicht mehr verdrängt werden), "moeglich" (noch offen),
+// "raus" (kann den Einzug nicht mehr schaffen) oder "zurueckgezogen". Gerechnet wird mit Punkten: Gleichstände gelten
+// vorsichtig - sicher nur, wenn selbst im ungünstigsten Fall genug Platz bleibt; raus nur, wenn ein Gegner sicher mehr Punkte hat.
+// Rückgabe: null (kein solcher Plan) oder { basis, extra, hf, alleFertig, offeneGesamt, gruppen: { [gruppenId]: { offene, zeilen: [{ teamId, status, platz }] } } }
+function qualifikationsStatus(plan) {
+  if (!plan || plan.modus !== "gruppen_ko" || plan.runden || !plan.gruppen || !plan.spiele) return null;
+  const k = Math.max(1, plan.gruppen.length);
+  const hf = !!plan.halbfinaleFix;
+  const basis = hf ? Math.floor(4 / k) : (plan.qualifiziertProGruppe || 2);
+  const extra = hf ? Math.max(0, 4 - k * basis) : 0;
+  const istOffen = (sp) => !sp.abgesagt && (sp.heimTore === null || sp.gastTore === null);
+  const offeneGesamt = plan.spiele.filter(istOffen).length;
+  const alleFertig = offeneGesamt === 0;
+  let feldIds = null;
+  if (hf && extra > 0 && alleFertig) {
+    const pa = halbfinalePaarungen(plan);
+    if (pa) feldIds = new Set(pa.flat());
+  }
+  const gruppen = {};
+  plan.gruppen.forEach((g) => {
+    const tabelle = berechneTabelle(g, plan.spiele);
+    const aktive = tabelle.filter((r) => !r.zurueckgezogen);
+    const rest = {};
+    plan.spiele.filter((sp) => sp.gruppeId === g.id && istOffen(sp)).forEach((sp) => {
+      rest[sp.heimId] = (rest[sp.heimId] || 0) + 1;
+      rest[sp.gastId] = (rest[sp.gastId] || 0) + 1;
+    });
+    const offene = plan.spiele.filter((sp) => sp.gruppeId === g.id && istOffen(sp)).length;
+    const maxPunkte = (r) => r.punkte + 3 * (rest[r.teamId] || 0);
+    const zeilen = tabelle.map((r) => {
+      if (r.zurueckgezogen) return { teamId: r.teamId, status: "zurueckgezogen", platz: null };
+      const andere = aktive.filter((x) => x.teamId !== r.teamId);
+      const platz = aktive.findIndex((x) => x.teamId === r.teamId) + 1;
+      const sicherFuer = (n) => andere.filter((u) => maxPunkte(u) >= r.punkte).length < n;
+      const ausFuer = (n) => andere.filter((u) => u.punkte > maxPunkte(r)).length >= n;
+      let status;
+      if (offene === 0) {
+        if (platz <= basis) status = "weiter";
+        else if (extra > 0) status = feldIds ? (feldIds.has(r.teamId) ? "weiter" : "raus") : (platz === basis + 1 ? "moeglich" : "raus");
+        else status = "raus";
+      } else if (sicherFuer(basis)) status = "sicher";
+      else if (ausFuer(extra > 0 ? basis + 1 : basis)) status = "raus";
+      else status = "moeglich";
+      return { teamId: r.teamId, status, platz };
+    });
+    gruppen[g.id] = { offene, zeilen };
+  });
+  return { basis, extra, hf, alleFertig, offeneGesamt, gruppen };
+}
+
+// "Wenn jetzt Schluss wäre": Halbfinal-Paarungen bzw. aktuell qualifizierte Mannschaften nach dem Zwischenstand.
+function endrundeVorschau(plan) {
+  const st = qualifikationsStatus(plan);
+  if (!st) return null;
+  const gespielt = plan.spiele.some((sp) => !sp.abgesagt && sp.heimTore !== null && sp.gastTore !== null);
+  if (st.hf) return { art: "halbfinale", vorlaeufig: !st.alleFertig, gespielt, paarungen: halbfinalePaarungen(plan) };
+  const qualifizierte = plan.gruppen.map((g) => ({
+    gruppe: g.name,
+    teamIds: berechneTabelle(g, plan.spiele).filter((r) => !r.zurueckgezogen).slice(0, st.basis).map((r) => r.teamId),
+  }));
+  return { art: "ko", vorlaeufig: !st.alleFertig, gespielt, qualifizierte };
 }
 
 // Format "Gruppenphase + Halbfinale + Finale": genau 4 Mannschaften erreichen das Halbfinale.
@@ -4111,10 +4219,15 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
     onGruppeVerschieben(teamId, zielGruppeId, tauschTeamId, zielIndex);
   };
 
+  const quali = qualifikationsStatus(plan);
+  const vorschau = quali ? endrundeVorschau(plan) : null;
+
   const gruppenBlock = plan.gruppen ? (
     <div className="kc-gruppen-raster">
       {plan.gruppen.map((g) => {
         const tabelle = berechneTabelle(g, plan.spiele);
+        const qualiZeilen = {};
+        if (quali && quali.gruppen[g.id]) quali.gruppen[g.id].zeilen.forEach((z) => { qualiZeilen[z.teamId] = z; });
         return (
           <div
             className={"kc-gruppe-block" + (dropZiel === "g:" + g.id ? " kc-drop-aktiv" : "")}
@@ -4147,6 +4260,8 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
                     key={r.teamId}
                     className={[
                       teamPasst(r.teamId) ? "kc-zeile-treffer" : "",
+                      qualiZeilen[r.teamId] ? "kc-quali-" + qualiZeilen[r.teamId].status : "",
+                      qualiZeilen[r.teamId] && qualiZeilen[r.teamId].platz === quali.basis ? "kc-quali-linie" : "",
                       ordnenErlaubt ? "kc-team-ziehbar" : "",
                       dropZiel === "t:" + r.teamId ? "kc-drop-aktiv" : "",
                     ].filter(Boolean).join(" ") || undefined}
@@ -4177,7 +4292,7 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
                       else verschiebeAusfuehren(teamId, g.id, r.teamId);
                     } : undefined}
                   >
-                    <td>{ordnenErlaubt && <span className="kc-griff" aria-hidden="true">≡ </span>}{teamName(r.teamId)}{r.zurueckgezogen && <span className="kc-spiel-marke kc-spiel-marke--abgesagt">Absage</span>}</td>
+                    <td>{ordnenErlaubt && <span className="kc-griff" aria-hidden="true">≡ </span>}{teamName(r.teamId)}{r.zurueckgezogen && <span className="kc-spiel-marke kc-spiel-marke--abgesagt">Absage</span>}{qualiZeilen[r.teamId] && QUALI_LABEL[qualiZeilen[r.teamId].status] && <span className={"kc-quali-marke kc-quali-marke--" + qualiZeilen[r.teamId].status}>{QUALI_LABEL[qualiZeilen[r.teamId].status]}</span>}</td>
                     <td>{r.spiele}</td>
                     <td>{r.siege}</td>
                     <td>{r.unentschieden}</td>
@@ -4444,6 +4559,47 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
         <p className="kc-hinweis" style={{ margin: "10px 0" }}>
           Die K.o.-Endrunde ist noch nicht gestartet – das kann der Veranstalter tun, sobald alle Gruppenspiele feststehen.
         </p>
+      )}
+      {quali && (
+        <div className="kc-quali-box">
+          <div className="kc-quali-legende">
+            <span className="kc-quali-marke kc-quali-marke--sicher">✅ weiter / sicher weiter</span>
+            <span className="kc-quali-marke kc-quali-marke--moeglich">⏳ noch offen</span>
+            <span className="kc-quali-marke kc-quali-marke--raus">✖ raus</span>
+          </div>
+          <p className="kc-notiz" style={{ margin: "6px 0 0" }}>
+            {quali.alleFertig ? "Alle Gruppenspiele sind gespielt." : `Noch ${quali.offeneGesamt} Gruppenspiel(e) offen.`}
+            {" "}{quali.hf
+              ? `Ins Halbfinale kommen die ${quali.basis} Besten jeder Gruppe${quali.extra > 0 ? ` plus ${quali.extra} beste(r) Nächstplatzierte(r)` : ""}.`
+              : `Je Gruppe kommen die ersten ${quali.basis} weiter.`}
+            {" "}Der Status berücksichtigt nur Punkte; bei Gleichstand entscheiden Tordifferenz und Tore.
+          </p>
+          {vorschau && vorschau.art === "halbfinale" && (
+            <div className="kc-quali-vorschau">
+              <strong>{vorschau.vorlaeufig ? "Halbfinale, wenn jetzt Schluss wäre (vorläufig)" : "Halbfinale (Gruppenphase beendet)"}</strong>
+              {!vorschau.gespielt || !vorschau.paarungen ? (
+                <p className="kc-notiz" style={{ margin: "4px 0 0" }}>Noch keine Vorschau möglich – es fehlen Ergebnisse.</p>
+              ) : (
+                <ul>
+                  {vorschau.paarungen.map(([h, gst], i) => (<li key={i}>{teamName(h)} – {teamName(gst)}</li>))}
+                </ul>
+              )}
+            </div>
+          )}
+          {vorschau && vorschau.art === "ko" && (
+            <div className="kc-quali-vorschau">
+              <strong>{vorschau.vorlaeufig ? "Aktuell weiter wären (vorläufig)" : "Weiter in die Endrunde"}</strong>
+              {!vorschau.gespielt ? (
+                <p className="kc-notiz" style={{ margin: "4px 0 0" }}>Noch keine Vorschau möglich – es fehlen Ergebnisse.</p>
+              ) : (
+                <ul>
+                  {vorschau.qualifizierte.map((q) => (<li key={q.gruppe}><strong>{q.gruppe}:</strong> {q.teamIds.map((id) => teamName(id)).join(", ")}</li>))}
+                </ul>
+              )}
+              <p className="kc-notiz" style={{ margin: "4px 0 0" }}>Die Paarungen der Endrunde werden beim Start ausgelost.</p>
+            </div>
+          )}
+        </div>
       )}
       {plan.modus === "gruppen_ko" && plan.runden && (
         <h3 className="kc-h3" style={{ marginTop: "18px" }}>K.o.-Endrunde</h3>
@@ -4801,7 +4957,7 @@ function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
 // Kleines Extra-Formular: startet die K.o.-Endrunde einer "Gruppe + Endrunde"-Kombination,
 // sobald die Gruppenphase abgeschlossen ist. Fragt eigene Startzeit/Spieldauer/Felder ab, da die
 // Endrunde meist zu einem späteren Zeitpunkt am Turniertag beginnt.
-function EndrundeStarten({ onEndrundeStarten, turnier, halbfinale }) {
+function EndrundeStarten({ onEndrundeStarten, turnier, halbfinale, offeneSpiele }) {
   const [startzeit, setStartzeit] = useState(turnier?.uhrzeit || "13:00");
   const [spieldauerMin, setSpieldauerMin] = useState(20);
   const [wechselzeitMin, setWechselzeitMin] = useState(0); // Pause zwischen zwei Spielen auf demselben Feld (Mannschaftswechsel)
@@ -4833,7 +4989,13 @@ function EndrundeStarten({ onEndrundeStarten, turnier, halbfinale }) {
           <span>Anzahl Felder/Plätze</span>
           <input className="kc-input" type="number" min="1" max="10" value={anzahlFelder} onChange={(e) => setAnzahlFelder(Number(e.target.value))} />
         </label>
-        <button className="kc-btn kc-btn--primary" onClick={() => onEndrundeStarten({ startzeit, spieldauerMin: spieldauerMin + wechselzeitMin, anzahlFelder })}>
+        {offeneSpiele > 0 && (
+          <p className="kc-fehler" style={{ margin: "0 0 8px" }}>Achtung: Noch {offeneSpiele} Gruppenspiel(e) ohne Ergebnis. Die Endrunde wird nach dem aktuellen Zwischenstand ausgelost und lässt sich danach nicht mehr ändern.</p>
+        )}
+        <button className="kc-btn kc-btn--primary" onClick={() => {
+          if (offeneSpiele > 0 && !confirm(`Noch ${offeneSpiele} Gruppenspiel(e) sind offen. Die Endrunde jetzt trotzdem nach dem aktuellen Stand auslosen und starten? Das lässt sich nicht rückgängig machen.`)) return;
+          onEndrundeStarten({ startzeit, spieldauerMin: spieldauerMin + wechselzeitMin, anzahlFelder });
+        }}>
           Endrunde jetzt auslosen &amp; starten
         </button>
       </div>
@@ -4919,7 +5081,7 @@ function SpielplanVerwaltung({ turnier, anmeldungen, plan, onErstellen, onSpielS
 
           <SpielplanAnzeige plan={plan} teams={anmeldungen} turnier={turnier} bearbeitbar onSpielSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} onGruppeVerschieben={onGruppeVerschieben} onPlanSpeichern={onPlanSpeichern} onAusWartelisteAufnehmen={onAusWartelisteAufnehmen} />
 
-          {endrundeAusstehend && <EndrundeStarten onEndrundeStarten={onEndrundeStarten} turnier={turnier} halbfinale={!!plan.halbfinaleFix} />}
+          {endrundeAusstehend && <EndrundeStarten onEndrundeStarten={onEndrundeStarten} turnier={turnier} halbfinale={!!plan.halbfinaleFix} offeneSpiele={(plan.spiele || []).filter((sp) => !sp.abgesagt && (sp.heimTore === null || sp.gastTore === null)).length} />}
         </>
       )}
     </div>
@@ -8502,6 +8664,19 @@ const CSS = `
 .kc-checkin-zeile { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; background: #fff; border-radius: 8px; padding: 8px 12px; margin-bottom: 6px; border-left: 4px solid #D0D5DA; }
 .kc-checkin-zeile--da { border-left-color: #2E9E57; background: #F2FBF5; }
 .kc-checkin-formular { margin-bottom: 8px; }
+.kc-quali-box { background: #F6F9FC; border: 1.5px solid #D6E3F0; border-radius: 10px; padding: 10px 12px; margin: 10px 0; }
+.kc-quali-legende { display: flex; gap: 8px; flex-wrap: wrap; }
+.kc-quali-marke { display: inline-block; font-size: 11px; font-weight: 600; border-radius: 999px; padding: 1px 8px; margin-left: 6px; white-space: nowrap; }
+.kc-quali-legende .kc-quali-marke { margin-left: 0; }
+.kc-quali-marke--weiter, .kc-quali-marke--sicher { background: #DDF3E4; color: #1D6B3A; }
+.kc-quali-marke--moeglich { background: #FFF2CC; color: #7A5A00; }
+.kc-quali-marke--raus { background: #F8DCDC; color: #9B2C2C; }
+.kc-quali-weiter td:first-child, .kc-quali-sicher td:first-child { box-shadow: inset 3px 0 0 #2E9E57; }
+.kc-quali-raus td:first-child { box-shadow: inset 3px 0 0 #D96B6B; }
+.kc-quali-moeglich td:first-child { box-shadow: inset 3px 0 0 #E8B93C; }
+.kc-tabelle tr.kc-quali-linie td { border-bottom: 2px solid #2E9E57; }
+.kc-quali-vorschau { margin-top: 8px; font-size: 13px; }
+.kc-quali-vorschau ul { margin: 4px 0 0; padding-left: 18px; }
 .kc-whatsapp-panel { background: #EEF8F0; border: 1.5px solid #B9DFC2; border-radius: 10px; padding: 12px 14px; margin-top: 10px; }
 .kc-whatsapp-anleitung { margin: 0 0 10px; padding-left: 20px; font-size: 13px; line-height: 1.5; }
 .kc-whatsapp-link { background: #fff; border-radius: 8px; padding: 8px 10px; font-size: 13px; word-break: break-all; }
