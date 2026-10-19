@@ -1328,6 +1328,7 @@ function spielplanNeuWuerfeln(plan, optionen) {
   const neu = { ...plan, ...erstelleGruppenplan(ids, anzahlGruppen, !!plan.mitRueckrunde, spieleProMannschaft), modus: plan.modus };
   if (plan.halbfinaleFix) neu.qualifiziertProGruppe = Math.max(1, Math.ceil(4 / Math.max(1, anzahlGruppen)));
   if (neu.direktFinale && anzahlGruppen !== 2) neu.direktFinale = false; // direktes Finale geht nur bei genau 2 Gruppen - dann Halbfinale
+  if (neu.platzierung && anzahlGruppen !== 2) neu.platzierung = false;
   const rahmen = planZeitrahmen(plan);
   let endeNeu = null;
   if (rahmen) {
@@ -1536,6 +1537,7 @@ function mannschaftLoeschen(plan, teamId) {
     gruppeEntfernt = true;
     if (neu.halbfinaleFix) neu.qualifiziertProGruppe = Math.max(1, Math.ceil(4 / Math.max(1, neu.gruppen.length)));
     if (neu.direktFinale && neu.gruppen.length !== 2) neu.direktFinale = false;
+    if (neu.platzierung && neu.gruppen.length !== 2) neu.platzierung = false;
   }
   const rest = gruppe && !gruppeEntfernt ? neu.gruppen.find((g) => g.id === gruppe.id).teamIds.length : 0;
   return { plan: neu, geaendert: true, fehler: null, betroffeneMitErgebnis: betroffen, anzahlSpiele: anzahl, gruppeName: gruppe ? gruppe.name : "", restInGruppe: rest, gruppeEntfernt };
@@ -1549,7 +1551,7 @@ const QUALI_LABEL = { weiter: "✅ weiter", sicher: "✅ sicher weiter", moeglic
 // vorsichtig - sicher nur, wenn selbst im ungünstigsten Fall genug Platz bleibt; raus nur, wenn ein Gegner sicher mehr Punkte hat.
 // Rückgabe: null (kein solcher Plan) oder { basis, extra, hf, alleFertig, offeneGesamt, gruppen: { [gruppenId]: { offene, zeilen: [{ teamId, status, platz }] } } }
 function qualifikationsStatus(plan) {
-  if (!plan || plan.modus !== "gruppen_ko" || plan.runden || !plan.gruppen || !plan.spiele) return null;
+  if (!plan || plan.modus !== "gruppen_ko" || plan.runden || !plan.gruppen || !plan.spiele || plan.platzierung) return null;
   const k = Math.max(1, plan.gruppen.length);
   const hf = !!plan.halbfinaleFix;
   const basis = hf ? Math.floor(4 / k) : (plan.qualifiziertProGruppe || 2);
@@ -1626,10 +1628,45 @@ function erstelleDirektFinalePlan(plan, optionen) {
   return { runden: [finale], platz3Spiel };
 }
 
-// Welche Endrunden-Art hat der Plan? "keine" | "halbfinale" | "direkt" | "ko"
+// Platzierungsspiele (nur bei genau 2 Gruppen): Der Erste der Gruppe A spielt gegen den Ersten der Gruppe B um Platz 1,
+// die Zweiten um Platz 3, die Dritten um Platz 5 und so weiter. Hat eine Gruppe mehr Mannschaften, bleiben die
+// überzähligen letzten ohne Gegner. maxSpiele (optional) begrenzt die Zahl der Spiele (z. B. nur bis Platz 5).
+function platzierungsPaarungen(plan, maxSpiele) {
+  const gruppen = plan.gruppen || [];
+  if (gruppen.length !== 2) return null;
+  const t = gruppen.map((g) => berechneTabelle(g, plan.spiele).filter((r) => !r.zurueckgezogen));
+  const n = Math.min(t[0].length, t[1].length);
+  if (n < 1) return null;
+  const grenze = Number.isFinite(Number(maxSpiele)) && Number(maxSpiele) >= 1 ? Math.min(n, Math.floor(Number(maxSpiele))) : n;
+  const spiele = [];
+  for (let i = 0; i < grenze; i++) spiele.push({ platz: 2 * i + 1, heimId: t[0][i].teamId, gastId: t[1][i].teamId });
+  const ohneGegner = [...t[0].slice(n), ...t[1].slice(n)].map((r) => r.teamId);
+  return { spiele, maximal: n, ohneGegner };
+}
+
+function erstellePlatzierungsPlan(plan, optionen) {
+  const pa = platzierungsPaarungen(plan, optionen && optionen.anzahlSpiele);
+  if (!pa) return null;
+  return { runden: [pa.spiele.map((x) => neuesSpiel(x.heimId, x.gastId, { sieger: null, platz: x.platz }))], platz3Spiel: null };
+}
+
+// Endplatzierung aus gespielten Platzierungsspielen: Sieger belegt "Platz", Verlierer "Platz + 1". Nur gespielte Spiele zählen.
+function endplatzierungAusPlan(plan) {
+  if (!plan || !plan.platzierung || !plan.runden || !plan.runden[0]) return [];
+  const liste = [];
+  plan.runden[0].forEach((sp) => {
+    if (sp.heimTore === null || sp.gastTore === null || !sp.sieger) return;
+    liste.push({ platz: sp.platz, teamId: sp.sieger });
+    liste.push({ platz: sp.platz + 1, teamId: sp.sieger === sp.heimId ? sp.gastId : sp.heimId });
+  });
+  return liste.sort((a, b) => a.platz - b.platz);
+}
+
+// Welche Endrunden-Art hat der Plan? "keine" | "halbfinale" | "direkt" | "platzierung" | "ko"
 function endrundeArtAusPlan(plan) {
   if (!plan || !plan.gruppen) return null;
   if (plan.modus !== "gruppen_ko") return "keine";
+  if (plan.platzierung) return "platzierung";
   if (plan.direktFinale) return "direkt";
   if (plan.halbfinaleFix) return "halbfinale";
   return "ko";
@@ -1637,7 +1674,7 @@ function endrundeArtAusPlan(plan) {
 
 // Ändert die Endrunden-Art eines Gruppenplans, ohne ihn neu zu erstellen: Gruppen, Gruppenspiele, Zeiten, Felder und
 // Ergebnisse bleiben unverändert. Eine schon ausgeloste Endrunde wird verworfen (nur möglich, solange dort noch kein
-// Ergebnis steht) und lässt sich anschließend neu starten. art: "keine" | "halbfinale" | "direkt" | "ko".
+// Ergebnis steht) und lässt sich anschließend neu starten. art: "keine" | "halbfinale" | "direkt" | "platzierung" | "ko".
 // opt: { spielUmPlatz3, qualifiziertProGruppe }
 function endrundeModusAendern(plan, art, opt) {
   const neu = JSON.parse(JSON.stringify(plan));
@@ -1646,7 +1683,7 @@ function endrundeModusAendern(plan, art, opt) {
   if (!neu.gruppen || !neu.spiele || (neu.modus !== "gruppen" && neu.modus !== "gruppen_ko")) {
     return fehler("Die Endrunde lässt sich nur bei Spielplänen mit Gruppenphase ändern (nicht bei K.o.-System oder Auf-/Abstieg).");
   }
-  if (!["keine", "halbfinale", "direkt", "ko"].includes(art)) return fehler("Unbekannte Endrunden-Art.");
+  if (!["keine", "halbfinale", "direkt", "platzierung", "ko"].includes(art)) return fehler("Unbekannte Endrunden-Art.");
   const k = neu.gruppen.length;
   const aktiv = neu.gruppen.map((g) => berechneTabelle(g, neu.spiele).filter((r) => !r.zurueckgezogen).length);
   const gesamt = aktiv.reduce((a, b) => a + b, 0);
@@ -1656,6 +1693,7 @@ function endrundeModusAendern(plan, art, opt) {
   }
   if (art === "halbfinale" && gesamt < 4) return fehler("Für Halbfinale und Finale werden mindestens 4 Mannschaften in den Gruppen benötigt.");
   if (art === "direkt" && (k !== 2 || aktiv[0] < 2 || aktiv[1] < 2)) return fehler("Das direkte Finale geht nur bei genau 2 Gruppen mit je mindestens 2 Mannschaften (Gruppensieger spielen das Finale, die Zweiten das Spiel um Platz 3).");
+  if (art === "platzierung" && (k !== 2 || aktiv[0] < 1 || aktiv[1] < 1)) return fehler("Die Platzierungsspiele gehen nur bei genau 2 Gruppen (1. A gegen 1. B um Platz 1, 2. A gegen 2. B um Platz 3 usw.).");
   const kleinsteGruppe = Math.max(1, Math.min(...aktiv));
   let q = Math.floor(Number(o.qualifiziertProGruppe));
   if (!Number.isFinite(q) || q < 1) q = 2;
@@ -1664,9 +1702,9 @@ function endrundeModusAendern(plan, art, opt) {
 
   const alt = endrundeArtAusPlan(neu);
   const wunschAlt = !!neu.spielUmPlatz3Wunsch;
-  const wunschNeu = art === "keine" ? false : !!o.spielUmPlatz3;
+  const wunschNeu = art === "keine" || art === "platzierung" ? false : !!o.spielUmPlatz3;
   const qAlt = neu.qualifiziertProGruppe || null;
-  const qNeu = art === "keine" ? null : art === "halbfinale" ? Math.max(1, Math.ceil(4 / Math.max(1, k))) : art === "direkt" ? 2 : q;
+  const qNeu = art === "keine" ? null : art === "halbfinale" ? Math.max(1, Math.ceil(4 / Math.max(1, k))) : art === "direkt" ? 2 : art === "platzierung" ? 1 : q;
   if (alt === art && wunschAlt === wunschNeu && (art !== "ko" || qAlt === qNeu)) return fehler("Der Spielplan ist bereits so eingestellt.");
 
   const gestartet = !!neu.runden;
@@ -1686,6 +1724,7 @@ function endrundeModusAendern(plan, art, opt) {
   neu.platz3Spiel = null;
   neu.halbfinaleFix = art === "halbfinale" || art === "direkt";
   neu.direktFinale = art === "direkt";
+  neu.platzierung = art === "platzierung";
   neu.modus = art === "keine" ? "gruppen" : "gruppen_ko";
   neu.qualifiziertProGruppe = qNeu;
   neu.spielUmPlatz3Wunsch = wunschNeu;
@@ -2107,7 +2146,7 @@ async function spielplanAlsPdfHerunterladen(plan, teams, turnier, sponsoren = []
       const istAufAbstieg = plan.modus === "aufabstieg";
       const titel = istAufAbstieg
         ? `Runde ${i + 1}`
-        : i === plan.runden.length - 1 ? "Finale" : i === plan.runden.length - 2 ? "Halbfinale" : `Runde ${i + 1}`;
+        : plan.platzierung ? "Platzierungsspiele" : i === plan.runden.length - 1 ? "Finale" : i === plan.runden.length - 2 ? "Halbfinale" : `Runde ${i + 1}`;
       doc.setFontSize(13);
       doc.setFont(undefined, "bold");
       doc.text(titel, 14, y);
@@ -2122,7 +2161,7 @@ async function spielplanAlsPdfHerunterladen(plan, teams, turnier, sponsoren = []
           y = pdfTabellenzeile(doc, 14, y, nrSpalten, ["", "", teamName(s.heimId), "Freilos", ""]);
         } else {
           const ergebnis = s.heimTore !== null && s.gastTore !== null ? `${s.heimTore}:${s.gastTore}${s.elfmeterHeim != null ? ` (n.E. ${s.elfmeterHeim}:${s.elfmeterGast})` : ""}` : "– : –";
-          const ersteSpalte = istAufAbstieg ? `Tisch ${s.tisch}` : zeitFeldText(s);
+          const ersteSpalte = istAufAbstieg ? `Tisch ${s.tisch}` : (plan.platzierung && s.platz ? `Pl. ${s.platz} · ` : "") + zeitFeldText(s);
           y = pdfTabellenzeile(doc, 14, y, nrSpalten, [String(spielNr[s.id] || ""), ersteSpalte, teamName(s.heimId), ergebnis, teamName(s.gastId)]);
         }
       });
@@ -2762,10 +2801,11 @@ function spielplanAusDb(p) {
     platz3Spiel: p.platz3spiel || null,
     mitRueckrunde: !!p.mit_rueckrunde,
     // Marker ohne neue DB-Spalte: Werte ab 100 bedeuten "Gruppen + Halbfinale + Finale" (Wert minus 100 = Qualifizierte je Gruppe)
-    // Werte ab 150: "Gruppen + direktes Finale" (Wert minus 150 = Qualifizierte je Gruppe)
-    qualifiziertProGruppe: p.qualifiziert_pro_gruppe >= 150 ? p.qualifiziert_pro_gruppe - 150 : p.qualifiziert_pro_gruppe >= 100 ? p.qualifiziert_pro_gruppe - 100 : (p.qualifiziert_pro_gruppe || null),
-    halbfinaleFix: p.qualifiziert_pro_gruppe >= 100,
-    direktFinale: p.qualifiziert_pro_gruppe >= 150,
+    // Werte ab 150: "Gruppen + direktes Finale" (Wert minus 150 = Qualifizierte je Gruppe), ab 170: "Gruppen + Platzierungsspiele"
+    qualifiziertProGruppe: p.qualifiziert_pro_gruppe >= 170 ? p.qualifiziert_pro_gruppe - 170 : p.qualifiziert_pro_gruppe >= 150 ? p.qualifiziert_pro_gruppe - 150 : p.qualifiziert_pro_gruppe >= 100 ? p.qualifiziert_pro_gruppe - 100 : (p.qualifiziert_pro_gruppe || null),
+    halbfinaleFix: p.qualifiziert_pro_gruppe >= 100 && p.qualifiziert_pro_gruppe < 170,
+    direktFinale: p.qualifiziert_pro_gruppe >= 150 && p.qualifiziert_pro_gruppe < 170,
+    platzierung: p.qualifiziert_pro_gruppe >= 170,
     spielUmPlatz3Wunsch: !!p.spiel_um_platz3_wunsch,
     teamNamen: p.team_namen || {},
   };
@@ -2775,7 +2815,7 @@ function spielplanZuDb(p) {
     id: p.id, turnier_id: p.turnierId, modus: p.modus, gruppen: p.gruppen || null, spiele: p.spiele || null, runden: p.runden || null,
     platz3spiel: p.platz3Spiel || null,
     mit_rueckrunde: !!p.mitRueckrunde,
-    qualifiziert_pro_gruppe: p.halbfinaleFix ? (p.direktFinale ? 150 : 100) + (p.qualifiziertProGruppe || 1) : (p.qualifiziertProGruppe || null),
+    qualifiziert_pro_gruppe: p.platzierung ? 170 + (p.qualifiziertProGruppe || 1) : p.halbfinaleFix ? (p.direktFinale ? 150 : 100) + (p.qualifiziertProGruppe || 1) : (p.qualifiziertProGruppe || null),
     spiel_um_platz3_wunsch: !!p.spielUmPlatz3Wunsch,
     team_namen: p.teamNamen || {},
   };
@@ -4582,11 +4622,11 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
         return (
           <div className="kc-runde-block" key={i}>
             <h3 className="kc-h3">
-              {i === plan.runden.length - 1 ? "Finale" : i === plan.runden.length - 2 ? "Halbfinale" : `Runde ${i + 1}`}
+              {plan.platzierung ? "Spiele um die Plätze" : i === plan.runden.length - 1 ? "Finale" : i === plan.runden.length - 2 ? "Halbfinale" : `Runde ${i + 1}`}
             </h3>
             <div className="kc-spiele-liste">
               {sichtbar.map((s) => (
-                <SpielZeile key={s.id} spiel={s} teamName={teamName} bearbeitbar={bearbeitbar && !s.freilos} onSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} zeigeSieger nummer={nummern[s.id]} hervorheben={filterBegriff} istNaechstes={naechstesId === s.id} />
+                <SpielZeile key={s.id} spiel={s} teamName={teamName} bearbeitbar={bearbeitbar && !s.freilos} onSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} zeigeSieger gruppenName={plan.platzierung && s.platz ? `Spiel um Platz ${s.platz}` : undefined} nummer={nummern[s.id]} hervorheben={filterBegriff} istNaechstes={naechstesId === s.id} />
               ))}
             </div>
           </div>
@@ -4600,6 +4640,17 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
           </div>
         </div>
       )}
+    </div>
+  ) : null;
+
+  // Endplatzierung der Platzierungsspiele (aus den bisher gespielten Spielen)
+  const endplatz = endplatzierungAusPlan(plan);
+  const platzierungsBlock = plan.platzierung && plan.runden && endplatz.length > 0 ? (
+    <div className="kc-quali-box" style={{ marginTop: 14 }}>
+      <strong>Endplatzierung{endplatz.length < plan.runden[0].length * 2 ? " (bisher)" : ""}</strong>
+      <ol style={{ margin: "6px 0 0", paddingLeft: 22 }}>
+        {endplatz.map((e) => (<li key={e.platz} value={e.platz}>{teamName(e.teamId)}</li>))}
+      </ol>
     </div>
   ) : null;
 
@@ -4760,10 +4811,27 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
           )}
         </div>
       )}
+      {plan.platzierung && !plan.runden && plan.modus === "gruppen_ko" && plan.gruppen && plan.spiele && (() => {
+        const pa = platzierungsPaarungen(plan);
+        const gespieltP = plan.spiele.some((sp) => !sp.abgesagt && sp.heimTore !== null && sp.gastTore !== null);
+        return (
+          <div className="kc-quali-box">
+            <strong>{plan.spiele.some((sp) => !sp.abgesagt && (sp.heimTore === null || sp.gastTore === null)) ? "Platzierungsspiele, wenn jetzt Schluss wäre (vorläufig)" : "Platzierungsspiele"}</strong>
+            {!gespieltP || !pa ? (
+              <p className="kc-notiz" style={{ margin: "4px 0 0" }}>Noch keine Vorschau möglich – es fehlen Ergebnisse.</p>
+            ) : (
+              <ul>
+                {pa.spiele.map((x) => (<li key={x.platz}><strong>Platz {x.platz}:</strong> {teamName(x.heimId)} – {teamName(x.gastId)}</li>))}
+              </ul>
+            )}
+          </div>
+        );
+      })()}
       {plan.modus === "gruppen_ko" && plan.runden && (
-        <h3 className="kc-h3" style={{ marginTop: "18px" }}>K.o.-Endrunde</h3>
+        <h3 className="kc-h3" style={{ marginTop: "18px" }}>{plan.platzierung ? "Platzierungsspiele" : "K.o.-Endrunde"}</h3>
       )}
       {koBlock}
+      {platzierungsBlock}
       {aufAbstiegBlock}
       {turnier && turnier.sponsoren && turnier.sponsoren.length > 0 && (
         <div className="kc-sponsoren-leiste">
@@ -4816,9 +4884,11 @@ function SpielZeile({ spiel, teamName, bearbeitbar, onSpeichern, onZeitSpeichern
           {gruppenName ? `${gruppenName}  ` : ""}
           {spiel.uhrzeit ? `🕐 ${spiel.uhrzeit} Uhr${spiel.feld ? ` · Feld ${spiel.feld}` : ""}` : ""}
         </span>
-        <span className="kc-abgesagt-text">{teamName(spiel.heimId)}</span>
+        <div className="kc-spiel-paarung">
+          <div className="kc-spiel-team"><span className="kc-spiel-teamname kc-abgesagt-text">{teamName(spiel.heimId)}</span><span className="kc-spiel-tore">–</span></div>
+          <div className="kc-spiel-team"><span className="kc-spiel-teamname kc-abgesagt-text">{teamName(spiel.gastId)}</span><span className="kc-spiel-tore">–</span></div>
+        </div>
         <span className="kc-spiel-ergebnis">entfällt</span>
-        <span className="kc-abgesagt-text">{teamName(spiel.gastId)}</span>
       </div>
     );
   }
@@ -4869,17 +4939,21 @@ function SpielZeile({ spiel, teamName, bearbeitbar, onSpeichern, onZeitSpeichern
           )}
         </span>
       )}
-      <span className={zeigeSieger && spiel.sieger === spiel.heimId ? "kc-team-sieger" : ""}>{teamNameMitTreffer(teamName(spiel.heimId), hervorheben)}</span>
-      {bearbeitbar && !wartetAufTeams ? (
-        <div className="kc-spiel-eingabe">
-          <input className="kc-input kc-input--klein" type="number" min="0" value={heim} onChange={(e) => setHeim(e.target.value)} />
-          <span>:</span>
-          <input className="kc-input kc-input--klein" type="number" min="0" value={gast} onChange={(e) => setGast(e.target.value)} />
-        </div>
-      ) : (
-        <span className="kc-spiel-ergebnis">{hatErgebnis ? `${spiel.heimTore} : ${spiel.gastTore}${spiel.elfmeterHeim != null ? ` (n.E. ${spiel.elfmeterHeim}:${spiel.elfmeterGast})` : ""}` : wartetAufTeams ? "offen" : "– : –"}</span>
-      )}
-      <span className={zeigeSieger && spiel.sieger === spiel.gastId ? "kc-team-sieger" : ""}>{teamNameMitTreffer(teamName(spiel.gastId), hervorheben)}</span>
+      <div className="kc-spiel-paarung">
+        {[["heim", spiel.heimId, heim, setHeim, spiel.heimTore], ["gast", spiel.gastId, gast, setGast, spiel.gastTore]].map(([seite, id, wert, setWert, tore]) => (
+          <div className={"kc-spiel-team" + (zeigeSieger && spiel.sieger && spiel.sieger === id ? " kc-team-sieger" : "")} key={seite}>
+            <span className="kc-spiel-teamname">{teamNameMitTreffer(teamName(id), hervorheben)}</span>
+            {bearbeitbar && !wartetAufTeams ? (
+              <input className="kc-input kc-input--klein" type="number" min="0" inputMode="numeric" aria-label={seite === "heim" ? "Tore Heim" : "Tore Gast"} value={wert} onChange={(e) => setWert(e.target.value)} />
+            ) : (
+              <span className="kc-spiel-tore">{hatErgebnis ? tore : wartetAufTeams ? "offen" : "–"}</span>
+            )}
+          </div>
+        ))}
+        {!(bearbeitbar && !wartetAufTeams) && hatErgebnis && spiel.elfmeterHeim != null && (
+          <span className="kc-notiz kc-spiel-elfmeter-text">nach Elfmeterschießen {spiel.elfmeterHeim}:{spiel.elfmeterGast}</span>
+        )}
+      </div>
       {bearbeitbar && !wartetAufTeams && (
         <div className="kc-spiel-aktionen">
           {zeigeSieger && heim !== "" && gast !== "" && Number(heim) === Number(gast) && (
@@ -4916,6 +4990,7 @@ function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
   const [mitEndrunde, setMitEndrunde] = useState(false);
   const [spielUmPlatz3, setSpielUmPlatz3] = useState(false);
   const [direktFinale, setDirektFinale] = useState(false); // Endrunde ohne Halbfinale: Gruppensieger im Finale, Zweite um Platz 3
+  const [platzierung, setPlatzierung] = useState(false); // Platzierungsspiele: 1.A-1.B um Platz 1, 2.A-2.B um Platz 3, ...
   const [qualifiziertProGruppe, setQualifiziertProGruppe] = useState(2);
   const [nichtJederGegenJeden, setNichtJederGegenJeden] = useState(false);
   const [spieleProMannschaft, setSpieleProMannschaft] = useState(4);
@@ -4964,10 +5039,12 @@ function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
             {modus === "gruppen_hf" && (
               <label className="kc-feld" style={{ marginTop: 8 }}>
                 <span>Endrunde</span>
-                <select className="kc-input" value={direktFinale ? "direkt" : "halbfinale"} onChange={(e) => { const direkt = e.target.value === "direkt"; setDirektFinale(direkt); if (direkt) { setAnzahlGruppen(2); setSpielUmPlatz3(true); } }}>
+                <select className="kc-input" value={platzierung ? "platzierung" : direktFinale ? "direkt" : "halbfinale"} onChange={(e) => { const w = e.target.value; setDirektFinale(w === "direkt"); setPlatzierung(w === "platzierung"); if (w === "direkt") setSpielUmPlatz3(true); if (w !== "halbfinale") setAnzahlGruppen(2); }}>
                   <option value="halbfinale">Halbfinale + Finale (Standard)</option>
                   <option value="direkt">Direktes Finale + Spiel um Platz 3 (ohne Halbfinale, spart Zeit)</option>
+                  <option value="platzierung">Platzierungsspiele (1.A–1.B um Platz 1, 2.A–2.B um Platz 3, 3.A–3.B um Platz 5 …)</option>
                 </select>
+                {platzierung && <span className="kc-notiz">Nach der Gruppenphase spielt jeweils der Gleichplatzierte der beiden Gruppen gegeneinander: die Ersten um Platz 1, die Zweiten um Platz 3, die Dritten um Platz 5 und so weiter. Nur bei genau 2 Gruppen. Wie viele Platzierungsspiele es werden, legst du beim Start der Endrunde fest.</span>}
                 {direktFinale && <span className="kc-notiz">Die beiden Gruppensieger spielen das Finale, die beiden Gruppenzweiten das Spiel um Platz 3. Nur bei genau 2 Gruppen. Lässt sich später unter „Endrunde ändern“ wieder umstellen.</span>}
               </label>
             )}
@@ -5074,7 +5151,7 @@ function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
               )}
             </>
           )}
-          {(modus === "ko" || modus === "gruppen_hf" || (mitEndrunde && (modus === "liga" || modus === "gruppen"))) && (
+          {(modus === "ko" || (modus === "gruppen_hf" && !platzierung) || (mitEndrunde && (modus === "liga" || modus === "gruppen"))) && (
             <label className="kc-checkbox-zeile">
               <input type="checkbox" checked={spielUmPlatz3} onChange={(e) => setSpielUmPlatz3(e.target.checked)} />
               <span>{modus === "gruppen_hf" && direktFinale ? "Spiel um Platz 3 (zwischen den beiden Gruppenzweiten)" : "Spiel um Platz 3 (zwischen den beiden Halbfinal-Verlierern)"}</span>
@@ -5109,7 +5186,7 @@ function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
           </p>
           <button
             className="kc-btn kc-btn--primary"
-            disabled={aufAbstiegUngeradeTeams || (modus === "gruppen_hf" && anzahlTeams < 4) || (modus === "gruppen_hf" && direktFinale && (anzahlGruppen !== 2 || anzahlTeams < 4))}
+            disabled={aufAbstiegUngeradeTeams || (modus === "gruppen_hf" && anzahlTeams < 4) || (modus === "gruppen_hf" && (direktFinale || platzierung) && (anzahlGruppen !== 2 || anzahlTeams < 4))}
             onClick={() => {
               const effektiverModus = modus === "gruppen_hf" || ((modus === "liga" || modus === "gruppen") && mitEndrunde) ? "gruppen_ko" : (modus === "liga" ? "gruppen" : modus);
               onErstellen(
@@ -5119,7 +5196,8 @@ function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
                 {
                   mitRueckrunde,
                   halbfinaleFix: modus === "gruppen_hf",
-                  direktFinale: modus === "gruppen_hf" && direktFinale && anzahlGruppen === 2,
+                  direktFinale: modus === "gruppen_hf" && direktFinale && !platzierung && anzahlGruppen === 2,
+                  platzierung: modus === "gruppen_hf" && platzierung && anzahlGruppen === 2,
                   spielUmPlatz3,
                   qualifiziertProGruppe,
                   spieleProMannschaft: nichtJederGegenJeden ? Math.min(spieleProMannschaft, maxSpieleProMannschaft) : null,
@@ -5139,7 +5217,8 @@ function SpielplanErstellen({ bestaetigteTeams, turnier, onErstellen }) {
 // Kleines Extra-Formular: startet die K.o.-Endrunde einer "Gruppe + Endrunde"-Kombination,
 // sobald die Gruppenphase abgeschlossen ist. Fragt eigene Startzeit/Spieldauer/Felder ab, da die
 // Endrunde meist zu einem späteren Zeitpunkt am Turniertag beginnt.
-function EndrundeStarten({ onEndrundeStarten, turnier, halbfinale, direkt, offeneSpiele }) {
+function EndrundeStarten({ onEndrundeStarten, turnier, halbfinale, direkt, platzierung, offeneSpiele }) {
+  const [anzahlPlatzierung, setAnzahlPlatzierung] = useState("");
   const [startzeit, setStartzeit] = useState(turnier?.uhrzeit || "13:00");
   const [spieldauerMin, setSpieldauerMin] = useState(20);
   const [wechselzeitMin, setWechselzeitMin] = useState(0); // Pause zwischen zwei Spielen auf demselben Feld (Mannschaftswechsel)
@@ -5147,11 +5226,12 @@ function EndrundeStarten({ onEndrundeStarten, turnier, halbfinale, direkt, offen
 
   return (
     <div className="kc-section kc-formular-karte" style={{ marginTop: "16px" }}>
-      <h2 className="kc-h2">{direkt ? "Finale & Spiel um Platz 3 starten" : halbfinale ? "Halbfinale & Finale starten" : "K.o.-Endrunde starten"}</h2>
+      <h2 className="kc-h2">{platzierung ? "Platzierungsspiele starten" : direkt ? "Finale & Spiel um Platz 3 starten" : halbfinale ? "Halbfinale & Finale starten" : "K.o.-Endrunde starten"}</h2>
       <p className="kc-sub">
+        {platzierung ? "Der Gleichplatzierte der beiden Gruppen spielt gegeneinander: die Ersten um Platz 1, die Zweiten um Platz 3, die Dritten um Platz 5 und so weiter. Am besten erst starten, wenn alle Gruppenspiele feststehen." : null}
         {direkt ? "Ohne Halbfinale: Die beiden Gruppensieger spielen das Finale, die beiden Gruppenzweiten das Spiel um Platz 3 (soweit gewünscht). Am besten erst starten, wenn alle Gruppenspiele feststehen." : null}
-        {halbfinale && !direkt ? "Die 4 Besten aus der Gruppenphase (nach aktueller Tabelle) spielen im Halbfinale, die Sieger im Finale. Am besten erst starten, wenn alle Gruppenspiele feststehen." : null}
-        {halbfinale ? null : "Ermittelt automatisch die besten Mannschaften je Gruppe (nach aktueller Tabelle) und baut daraus die Endrunde. Am besten erst starten, wenn alle Gruppenspiele feststehen."}
+        {halbfinale && !direkt && !platzierung ? "Die 4 Besten aus der Gruppenphase (nach aktueller Tabelle) spielen im Halbfinale, die Sieger im Finale. Am besten erst starten, wenn alle Gruppenspiele feststehen." : null}
+        {halbfinale || platzierung ? null : "Ermittelt automatisch die besten Mannschaften je Gruppe (nach aktueller Tabelle) und baut daraus die Endrunde. Am besten erst starten, wenn alle Gruppenspiele feststehen."}
       </p>
       <div className="kc-formular">
         <div className="kc-feld-reihe">
@@ -5172,12 +5252,19 @@ function EndrundeStarten({ onEndrundeStarten, turnier, halbfinale, direkt, offen
           <span>Anzahl Felder/Plätze</span>
           <input className="kc-input" type="number" min="1" max="10" value={anzahlFelder} onChange={(e) => setAnzahlFelder(Number(e.target.value))} />
         </label>
+        {platzierung && (
+          <label className="kc-feld" style={{ maxWidth: 320 }}>
+            <span>Anzahl Platzierungsspiele (höchstens {platzierung.maximal})</span>
+            <input className="kc-input" type="number" min="1" max={platzierung.maximal} placeholder={String(platzierung.maximal)} value={anzahlPlatzierung} onChange={(e) => setAnzahlPlatzierung(e.target.value)} />
+            <span className="kc-notiz">Leer lassen = alle Plätze ausspielen. Bei weniger Spielen (z. B. nur bis Platz 5) spart ihr Zeit.{platzierung.ohneGegner.length > 0 ? ` ${platzierung.ohneGegner.length} Mannschaft(en) haben wegen ungleicher Gruppengrößen keinen Gegner.` : ""}</span>
+          </label>
+        )}
         {offeneSpiele > 0 && (
           <p className="kc-fehler" style={{ margin: "0 0 8px" }}>Achtung: Noch {offeneSpiele} Gruppenspiel(e) ohne Ergebnis. Die Endrunde wird nach dem aktuellen Zwischenstand ausgelost und lässt sich danach nicht mehr ändern.</p>
         )}
         <button className="kc-btn kc-btn--primary" onClick={() => {
           if (offeneSpiele > 0 && !confirm(`Noch ${offeneSpiele} Gruppenspiel(e) sind offen. Die Endrunde jetzt trotzdem nach dem aktuellen Stand auslosen und starten? Das lässt sich nicht rückgängig machen.`)) return;
-          onEndrundeStarten({ startzeit, spieldauerMin: spieldauerMin + wechselzeitMin, anzahlFelder });
+          onEndrundeStarten({ startzeit, spieldauerMin: spieldauerMin + wechselzeitMin, anzahlFelder, anzahlSpiele: platzierung && anzahlPlatzierung !== "" ? Number(anzahlPlatzierung) : undefined });
         }}>
           Endrunde jetzt auslosen &amp; starten
         </button>
@@ -5245,7 +5332,7 @@ function EndrundeAendern({ plan, onPlanSpeichern }) {
   const [erfolg, setErfolg] = useState("");
   const [speichert, setSpeichert] = useState(false);
   if (!plan.gruppen || !plan.spiele || !onPlanSpeichern || (plan.modus !== "gruppen" && plan.modus !== "gruppen_ko")) return null;
-  const artText = { keine: "Keine Endrunde (nur Gruppenphase)", halbfinale: "Halbfinale + Finale (4 Beste)", direkt: "Direktes Finale + Spiel um Platz 3 (ohne Halbfinale)", ko: "K.o.-Endrunde (die Besten jeder Gruppe)" };
+  const artText = { keine: "Keine Endrunde (nur Gruppenphase)", halbfinale: "Halbfinale + Finale (4 Beste)", direkt: "Direktes Finale + Spiel um Platz 3 (ohne Halbfinale)", platzierung: "Platzierungsspiele (1.A–1.B um Platz 1, 2.A–2.B um Platz 3, …)", ko: "K.o.-Endrunde (die Besten jeder Gruppe)" };
   const vorschau = endrundeModusAendern(plan, art, { spielUmPlatz3: platz3, qualifiziertProGruppe: qpg });
   const speichern = async () => {
     setMeldung(""); setErfolg("");
@@ -5280,7 +5367,7 @@ function EndrundeAendern({ plan, onPlanSpeichern }) {
               <input className="kc-input" type="number" min="1" max="8" value={qpg} onChange={(e) => setQpg(Math.max(1, Math.floor(Number(e.target.value)) || 1))} />
             </label>
           )}
-          {art !== "keine" && (
+          {art !== "keine" && art !== "platzierung" && (
             <label className="kc-checkbox-zeile">
               <input type="checkbox" checked={platz3} onChange={(e) => setPlatz3(e.target.checked)} />
               <span>{art === "direkt" ? "Spiel um Platz 3 (zwischen den beiden Gruppenzweiten)" : "Spiel um Platz 3 (zwischen den beiden Halbfinal-Verlierern)"}</span>
@@ -5329,7 +5416,7 @@ function SpielplanVerwaltung({ turnier, anmeldungen, plan, onErstellen, onSpielS
 
           <SpielplanAnzeige plan={plan} teams={anmeldungen} turnier={turnier} bearbeitbar onSpielSpeichern={onSpielSpeichern} onZeitSpeichern={onZeitSpeichern} onGruppeVerschieben={onGruppeVerschieben} onPlanSpeichern={onPlanSpeichern} onAusWartelisteAufnehmen={onAusWartelisteAufnehmen} />
 
-          {endrundeAusstehend && <EndrundeStarten onEndrundeStarten={onEndrundeStarten} turnier={turnier} halbfinale={!!plan.halbfinaleFix} direkt={!!plan.direktFinale} offeneSpiele={(plan.spiele || []).filter((sp) => !sp.abgesagt && (sp.heimTore === null || sp.gastTore === null)).length} />}
+          {endrundeAusstehend && <EndrundeStarten onEndrundeStarten={onEndrundeStarten} turnier={turnier} halbfinale={!!plan.halbfinaleFix} direkt={!!plan.direktFinale} platzierung={platzierungsPaarungen(plan)} offeneSpiele={(plan.spiele || []).filter((sp) => !sp.abgesagt && (sp.heimTore === null || sp.gastTore === null)).length} />}
         </>
       )}
     </div>
@@ -6350,8 +6437,9 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
           neuerPlan.halbfinaleFix = true;
           neuerPlan.qualifiziertProGruppe = Math.max(1, Math.ceil(4 / Math.max(1, anzahlGruppen)));
           if (zusatzOptionen.direktFinale && anzahlGruppen === 2) { neuerPlan.direktFinale = true; neuerPlan.qualifiziertProGruppe = 2; }
+          if (zusatzOptionen.platzierung && anzahlGruppen === 2) { neuerPlan.platzierung = true; neuerPlan.halbfinaleFix = false; neuerPlan.direktFinale = false; neuerPlan.qualifiziertProGruppe = 1; }
         }
-        neuerPlan.spielUmPlatz3Wunsch = !!spielUmPlatz3;
+        neuerPlan.spielUmPlatz3Wunsch = !!spielUmPlatz3 && !(zusatzOptionen && zusatzOptionen.platzierung);
       }
     } else if (modus === "aufabstieg") {
       neuerPlan = erstelleAufAbstiegPlan(bestaetigteIds, anzahlRunden || 5);
@@ -6373,6 +6461,20 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
   // je Gruppe (nach Tabelle) und baut daraus einen frischen K.o.-Baum, der an die bestehende
   // Gruppenphase angehängt wird - die Gruppendaten selbst bleiben dabei vollständig erhalten.
   const endrundeStarten = async (turnier, plan, zeitOptionen) => {
+    if (plan.platzierung) {
+      const pl = erstellePlatzierungsPlan(plan, { anzahlSpiele: zeitOptionen && zeitOptionen.anzahlSpiele });
+      if (!pl) { alert("Für die Platzierungsspiele werden genau 2 Gruppen mit mindestens je einer Mannschaft benötigt."); return; }
+      // Hohe Platzierungen zuletzt: Spiel um Platz 1 wird als letztes eingeplant
+      if (zeitOptionen) zeitenZuweisenAnListe([...pl.runden[0]].reverse(), zeitOptionen);
+      const fertig = { ...plan, runden: pl.runden, platz3Spiel: null };
+      try {
+        const zeile = await supabaseUpdate("spielplaene", plan.id, spielplanZuDb(fertig), session.access_token);
+        setSpielplaene((prev) => prev.map((p) => (p.id === plan.id ? spielplanAusDb(zeile[0]) : p)));
+      } catch (e) {
+        alert("Endrunde konnte nicht gestartet werden: " + e.message);
+      }
+      return;
+    }
     if (plan.direktFinale) {
       const df = erstelleDirektFinalePlan(plan, { spielUmPlatz3: plan.spielUmPlatz3Wunsch });
       if (!df) { alert("Für das direkte Finale werden genau 2 Gruppen mit je mindestens 2 Mannschaften benötigt."); return; }
@@ -9030,9 +9132,15 @@ const CSS = `
 
 .kc-spiele-liste { display: flex; flex-direction: column; gap: 8px; }
 .kc-spiel-zeile { display: flex; align-items: center; gap: 8px; font-size: 13.5px; background: #F8FAF7; border-radius: 7px; padding: 8px 10px; flex-wrap: wrap; }
-.kc-spiel-meta { flex-basis: 100%; font-size: 11.5px; color: var(--kc-muted); font-weight: 600; }
+.kc-spiel-meta { flex-basis: 100%; font-size: 11.5px; color: var(--kc-muted); font-weight: 600; display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; white-space: nowrap; }
+.kc-spiel-paarung { flex-basis: 100%; display: flex; flex-direction: column; gap: 0; }
+.kc-spiel-team { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 5px 0; border-bottom: 1px solid #E3EAE0; }
+.kc-spiel-team:last-of-type { border-bottom: 0; }
+.kc-spiel-teamname { flex: 1; min-width: 0; font-weight: 600; font-size: 14.5px; overflow-wrap: anywhere; }
+.kc-spiel-tore { font-weight: 800; font-size: 17px; min-width: 44px; text-align: center; }
+.kc-spiel-team .kc-input--klein { width: 68px; font-size: 16px; font-weight: 700; }
+.kc-spiel-elfmeter-text { text-align: right; margin-top: 2px; }
 .kc-spiel-zeit-bearbeiten { flex-basis: 100%; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.kc-spiel-zeile > span:first-child, .kc-spiel-zeile > span:nth-child(3) { flex: 1; min-width: 90px; }
 .kc-spiel-zeile--freilos { color: var(--kc-muted); font-style: italic; }
 .kc-spiel-ergebnis { font-weight: 700; min-width: 48px; text-align: center; }
 .kc-spiel-eingabe { display: flex; align-items: center; gap: 4px; }
