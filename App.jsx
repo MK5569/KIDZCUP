@@ -2291,7 +2291,7 @@ function zahlungsBelegZeichnen(doc, anmeldung, turnier) {
 
   doc.setFontSize(12);
   doc.text("Startgebühr", 14, y);
-  doc.text(anmeldung.gebuehrenfrei ? "befreit (0 €)" : `${turnier.preis.toFixed(2)} €`, 160, y);
+  doc.text(anmeldung.gebuehrenfrei ? "befreit (0 €)" : `${Number(turnier.preis).toFixed(2)} €`, 160, y);
   y += 10;
 
   doc.setFontSize(10);
