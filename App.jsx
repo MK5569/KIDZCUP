@@ -6982,14 +6982,14 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                   {t.veroeffentlicht === false && <span className="kc-status-chip kc-status-chip--gelb" style={{ marginLeft: 8 }}>📝 Entwurf</span>}
                 </h2>
                 <div className="kc-karte__zahl">
-                  <span className="kc-zahl-gross">{belegt}/{t.maxPlaetze}</span>
-                  <span className="kc-zahl-label">belegt{wartelisteRegs.length > 0 ? ` · ${wartelisteRegs.length} Warteliste` : ""}</span>
+                  <span className="kc-zahl-gross">{bestaetigteRegs.length}/{t.maxPlaetze}</span>
+                  <span className="kc-zahl-label">bestätigt{wartelisteRegs.length > 0 ? ` · ${wartelisteRegs.length} Warteliste` : ""}</span>
                 </div>
               </div>
-              <div className="kc-fortschritt" role="img" aria-label={`${belegt} von ${t.maxPlaetze} Plätzen belegt`}>
+              <div className="kc-fortschritt" role="img" aria-label={`${bestaetigteRegs.length} von ${t.maxPlaetze} Plätzen bestätigt`}>
                 <div
                   className={`kc-fortschritt__fuellung${frei === 0 ? " kc-fortschritt__fuellung--voll" : ""}`}
-                  style={{ width: `${t.maxPlaetze > 0 ? Math.min(100, Math.round((belegt / t.maxPlaetze) * 100)) : 0}%` }}
+                  style={{ width: `${t.maxPlaetze > 0 ? Math.min(100, Math.round((bestaetigteRegs.length / t.maxPlaetze) * 100)) : 0}%` }}
                 />
               </div>
               <div className="kc-status-zusammenfassung">
@@ -8831,8 +8831,17 @@ function TurnierFormular({ bestehendesTurnier, vorlage, ausrichterVorschlaege = 
     setLogoVorschau(URL.createObjectURL(datei));
   };
 
+  // Beim Öffnen (Bearbeiten/Duplizieren/Neu) direkt zum Formular springen - sonst muss man nach oben scrollen.
+  const formularRef = useRef(null);
+  useEffect(() => {
+    const el = formularRef.current;
+    if (el && typeof el.scrollIntoView === "function") {
+      try { el.scrollIntoView({ behavior: "smooth", block: "start" }); } catch { el.scrollIntoView(); }
+    }
+  }, []);
+
   return (
-    <div className="kc-section kc-formular-karte">
+    <div className="kc-section kc-formular-karte" ref={formularRef} style={{ scrollMarginTop: 12 }}>
       <h2 className="kc-h2">{bestehendesTurnier ? `Turnier bearbeiten: ${bestehendesTurnier.name}` : vorlage ? `Turnier duplizieren: ${vorlage.name}` : "Neues Turnier anlegen"}</h2>
       {vorlage && !bestehendesTurnier && (
         <p className="kc-notiz">
