@@ -7304,6 +7304,9 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                         {st === "zahlung_gemeldet" && (
                           <div className="kc-admin-aktionen kc-admin-aktionen--klein">
                             <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "bestaetigt")}>Bestätigen</button>
+                            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => { if (window.confirm(`„${a.verein}“ kostenfrei bestätigen? Die Startgebühr entfällt für diese Mannschaft.`)) anmeldungKostenfreiAnnehmen(a.id); }}>
+                              🆓 Kostenfrei bestätigen
+                            </button>
                             <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAblehnen(a)}>Ablehnen</button>
                           </div>
                         )}
@@ -7315,6 +7318,9 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                             <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => erinnerungSenden(a)}>
                               ✉️ Erinnerung senden
                             </button>
+                            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => { if (window.confirm(`„${a.verein}“ kostenfrei bestätigen? Die Startgebühr entfällt für diese Mannschaft.`)) anmeldungKostenfreiAnnehmen(a.id); }}>
+                              🆓 Kostenfrei bestätigen
+                            </button>
                             <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAblehnen(a)}>Ablehnen</button>
                           </div>
                         )}
@@ -7325,6 +7331,9 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                             </button>
                             <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "bestaetigt")}>
                               ✅ Direkt bestätigen (bereits bezahlt)
+                            </button>
+                            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => { if (window.confirm(`„${a.verein}“ kostenfrei bestätigen? Die Startgebühr entfällt für diese Mannschaft.`)) anmeldungKostenfreiAnnehmen(a.id); }}>
+                              🆓 Kostenfrei bestätigen
                             </button>
                             <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAblehnen(a)}>Ablehnen</button>
                           </div>
@@ -7418,6 +7427,9 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                         {st === "zahlung_gemeldet" && (
                           <div className="kc-admin-aktionen kc-admin-aktionen--klein">
                             <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "bestaetigt")}>Bestätigen</button>
+                            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => { if (window.confirm(`„${a.verein}“ kostenfrei bestätigen? Die Startgebühr entfällt für diese Mannschaft.`)) anmeldungKostenfreiAnnehmen(a.id); }}>
+                              🆓 Kostenfrei bestätigen
+                            </button>
                             <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAblehnen(a)}>Ablehnen</button>
                           </div>
                         )}
@@ -7429,6 +7441,9 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                             <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => erinnerungSenden(a)}>
                               ✉️ Erinnerung senden
                             </button>
+                            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => { if (window.confirm(`„${a.verein}“ kostenfrei bestätigen? Die Startgebühr entfällt für diese Mannschaft.`)) anmeldungKostenfreiAnnehmen(a.id); }}>
+                              🆓 Kostenfrei bestätigen
+                            </button>
                             <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAblehnen(a)}>Ablehnen</button>
                           </div>
                         )}
@@ -7439,6 +7454,9 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                             </button>
                             <button className="kc-btn kc-btn--primary kc-btn--klein" onClick={() => anmeldungAktualisieren(a.id, "bestaetigt")}>
                               ✅ Direkt bestätigen (bereits bezahlt)
+                            </button>
+                            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => { if (window.confirm(`„${a.verein}“ kostenfrei bestätigen? Die Startgebühr entfällt für diese Mannschaft.`)) anmeldungKostenfreiAnnehmen(a.id); }}>
+                              🆓 Kostenfrei bestätigen
                             </button>
                             <button className="kc-btn kc-btn--gefahr kc-btn--klein" onClick={() => anmeldungAblehnen(a)}>Ablehnen</button>
                           </div>
