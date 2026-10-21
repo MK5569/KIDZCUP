@@ -2241,8 +2241,7 @@ async function spielplanAlsPdfHerunterladen(plan, teams, turnier, sponsoren = []
 // Erstellt clientseitig einen einfachen Zahlungsbeleg als PDF. Das ist eine Bestätigung/
 // Quittung für die eigenen Unterlagen des Vereins - kein formales Rechnungsdokument mit
 // USt-Pflichtangaben (falls sowas gebraucht wird, ist das ein separates Thema).
-function zahlungsBelegHerunterladen(anmeldung, turnier) {
-  const doc = new jsPDF();
+function zahlungsBelegZeichnen(doc, anmeldung, turnier) {
   let y = 16;
 
   doc.addImage(LOGO_SRC, "JPEG", 14, y, 46, 9.5);
@@ -2307,8 +2306,24 @@ function zahlungsBelegHerunterladen(anmeldung, turnier) {
   doc.setFontSize(8.5);
   doc.setTextColor(120, 120, 120);
   doc.text("Dies ist eine Zahlungsbestätigung für eure Unterlagen, kein formales Rechnungsdokument.", 14, y);
+  doc.setTextColor(0, 0, 0);
+}
 
+function zahlungsBelegHerunterladen(anmeldung, turnier) {
+  const doc = new jsPDF();
+  zahlungsBelegZeichnen(doc, anmeldung, turnier);
   doc.save(`zahlungsbeleg-${anmeldung.verein.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.pdf`);
+}
+
+// Alle Quittungen eines Turniers in einem PDF (je Mannschaft eine Seite) - z. B. zum Ausdrucken oder Versenden.
+function zahlungsBelegeAlleHerunterladen(anmeldungen, turnier) {
+  if (!anmeldungen.length) return;
+  const doc = new jsPDF();
+  anmeldungen.forEach((a, i) => {
+    if (i > 0) doc.addPage();
+    zahlungsBelegZeichnen(doc, a, turnier);
+  });
+  doc.save(`quittungen-${(turnier.name || "turnier").replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.pdf`);
 }
 
 // Reihenfolge der Status-Gruppen in der Teilnehmerliste: erst die, die noch Handlungsbedarf haben
@@ -5609,6 +5624,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
   const [schiedsrichter, setSchiedsrichter] = useState([]);
   const [checkinVerfuegbar, setCheckinVerfuegbar] = useState(true);
   const [offeneCheckin, setOffeneCheckin] = useState(() => new Set());
+  const [offeneQuittungen, setOffeneQuittungen] = useState(() => new Set());
 
   const [zeigeFormular, setZeigeFormular] = useState(false);
   const [bearbeitetesTurnier, setBearbeitetesTurnier] = useState(null);
@@ -5630,6 +5646,8 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
   const [adminMonatFilter, setAdminMonatFilter] = useState("");
   const [adminJugendFilter, setAdminJugendFilter] = useState("");
   const [adminSuche, setAdminSuche] = useState("");
+  const [adminAusrichterFilter, setAdminAusrichterFilter] = useState(""); // Schlüssel (klein geschrieben) oder ""
+  const [adminNachAusrichter, setAdminNachAusrichter] = useState(false); // Liste nach Ausrichter gruppieren
   const [filterOffen, setFilterOffen] = useState(false);
 
   const nachLoginProfilLaden = async (neueSession) => {
@@ -6848,9 +6866,11 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
             if (adminMonatFilter !== "" && new Date(t.datum).getMonth() !== Number(adminMonatFilter)) return false;
             if (adminJugendFilter !== "" && t.zielgruppen && t.zielgruppen.length > 0 && !t.zielgruppen.includes(adminJugendFilter)) return false;
             if (adminSuche.trim() !== "" && !t.name.toLowerCase().includes(adminSuche.trim().toLowerCase())) return false;
+            if (adminAusrichterFilter !== "" && ausrichterName(t).toLowerCase() !== adminAusrichterFilter) return false;
             return true;
           });
-          const filterAktiv = adminMonatFilter !== "" || adminJugendFilter !== "" || adminSuche.trim() !== "";
+          const alleAusrichter = gruppiereNachAusrichter(sortiert);
+          const filterAktiv = adminMonatFilter !== "" || adminJugendFilter !== "" || adminSuche.trim() !== "" || adminAusrichterFilter !== "";
           return (
             <>
               <div className="kc-filter-leiste kc-filter-leiste--kompakt">
@@ -6871,6 +6891,12 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                 >
                   Filter {filterOffen || filterAktiv ? "▴" : "▾"}{filterAktiv ? " •" : ""}
                 </button>
+                {alleAusrichter.length > 1 && (
+                  <label className="kc-checkbox-zeile kc-gruppieren-schalter">
+                    <input type="checkbox" checked={adminNachAusrichter} onChange={(e) => setAdminNachAusrichter(e.target.checked)} />
+                    <span>Nach Ausrichter gruppieren</span>
+                  </label>
+                )}
                 {gefiltert.length > 0 && (
                   <>
                     <button
@@ -6899,6 +6925,17 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                       ))}
                     </select>
                   </label>
+                  {alleAusrichter.length > 1 && (
+                    <label className="kc-feld">
+                      <span>Ausrichter</span>
+                      <select className="kc-input" value={adminAusrichterFilter} onChange={(e) => setAdminAusrichterFilter(e.target.value)}>
+                        <option value="">Alle Ausrichter</option>
+                        {[...alleAusrichter].sort((a, b) => a.name.localeCompare(b.name, "de")).map((g) => (
+                          <option key={g.schluessel} value={g.schluessel}>{g.name} ({g.turniere.length})</option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
                   <label className="kc-feld">
                     <span>Jugend</span>
                     <select className="kc-input" value={adminJugendFilter} onChange={(e) => setAdminJugendFilter(e.target.value)}>
@@ -6909,7 +6946,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                     </select>
                   </label>
                   {filterAktiv && (
-                    <button className="kc-btn kc-btn--sekundaer kc-btn--klein kc-filter-zuruecksetzen" onClick={() => { setAdminMonatFilter(""); setAdminJugendFilter(""); setAdminSuche(""); }}>
+                    <button className="kc-btn kc-btn--sekundaer kc-btn--klein kc-filter-zuruecksetzen" onClick={() => { setAdminMonatFilter(""); setAdminJugendFilter(""); setAdminSuche(""); setAdminAusrichterFilter(""); }}>
                       Filter zurücksetzen
                     </button>
                   )}
@@ -6922,7 +6959,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
               const istVergangen = (t) => turnierIstVorbei(t, jetzt);
               const aktuelleTurniere = gefiltert.filter((t) => !istVergangen(t));
               const vergangeneTurniere = gefiltert.filter(istVergangen).reverse(); // neueste zuerst
-              const archivSichtbar = archivOffen || adminSuche.trim() !== "";
+              const archivSichtbar = archivOffen || adminSuche.trim() !== "" || adminAusrichterFilter !== "";
               const karteRendern = (t) => {
           const regsFuerTurnier = anmeldungen.filter((a) => a.turnierId === t.id);
           const wartelisteRegs = regsFuerTurnier.filter((a) => effektiverStatus(a, jetzt) === "warteliste");
@@ -7092,6 +7129,16 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                 </button>
                 <button
                   role="menuitem" className="kc-menue__eintrag"
+                  onClick={() => setOffeneQuittungen((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(t.id)) next.delete(t.id); else next.add(t.id);
+                    return next;
+                  })}
+                >
+                  🧾 Quittungen (Startgebühr){bestaetigteRegs.length > 0 ? ` (${bestaetigteRegs.length})` : ""}
+                </button>
+                <button
+                  role="menuitem" className="kc-menue__eintrag"
                   onClick={() => setOffeneCheckin((prev) => {
                     const next = new Set(prev);
                     if (next.has(t.id)) next.delete(t.id); else next.add(t.id);
@@ -7146,6 +7193,40 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                   onSchiedsrichterCheckin={schiedsrichterCheckin}
                   onSchiedsrichterLoeschen={schiedsrichterLoeschen}
                 />
+              )}
+
+              {offeneQuittungen.has(t.id) && (
+                <div className="kc-quittungen-panel">
+                  <h3 className="kc-h3">🧾 Quittungen – Startgebühr bezahlt</h3>
+                  <p className="kc-notiz">
+                    Für jede bestätigte Mannschaft (Zahlung geprüft) lässt sich eine Quittung als PDF erzeugen –
+                    auch nach dem Turnier. Gebührenfreie Teams erhalten eine Bestätigung über 0 €.
+                  </p>
+                  {bestaetigteRegs.length === 0 && <p className="kc-notiz">Keine bestätigten Mannschaften vorhanden.</p>}
+                  {bestaetigteRegs.length > 0 && (
+                    <>
+                      <ul className="kc-quittungen-liste">
+                        {[...bestaetigteRegs].sort((x, y) => (x.verein || "").localeCompare(y.verein || "")).map((a) => (
+                          <li key={a.id} className="kc-quittungen-zeile">
+                            <span>
+                              <strong>{a.verein}</strong> · {a.jugend}
+                              <span className="kc-notiz"> · {a.gebuehrenfrei ? "gebührenfrei" : `${Number(t.preis).toFixed(2)} € bezahlt`}{a.bestaetigtAm ? ` · bestätigt ${formatDatum(a.bestaetigtAm)}` : ""}</span>
+                            </span>
+                            <button className="kc-btn kc-btn--sekundaer kc-btn--klein" onClick={() => zahlungsBelegHerunterladen(a, t)}>
+                              Quittung (PDF)
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                      <button
+                        className="kc-btn kc-btn--primary kc-btn--klein"
+                        onClick={() => zahlungsBelegeAlleHerunterladen([...bestaetigteRegs].sort((x, y) => (x.verein || "").localeCompare(y.verein || "")), t)}
+                      >
+                        Alle Quittungen in einem PDF
+                      </button>
+                    </>
+                  )}
+                </div>
               )}
 
               {offeneSponsoren.has(t.id) && (
@@ -7459,6 +7540,16 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
             </div>
           );
               };
+              // Optional nach Ausrichter gruppiert: je Ausrichter eine Überschrift, darunter dessen Turniere (Reihenfolge bleibt).
+              const listeRendern = (liste) => {
+                if (!adminNachAusrichter) return liste.map(karteRendern);
+                return gruppiereNachAusrichter(liste).map((g) => (
+                  <section className="kc-ausrichter-block" key={g.schluessel}>
+                    <h3 className="kc-ausrichter-kopf">{g.name} <span className="kc-notiz">· {g.turniere.length} Turnier{g.turniere.length !== 1 ? "e" : ""}</span></h3>
+                    {g.turniere.map(karteRendern)}
+                  </section>
+                ));
+              };
               return (
                 <>
                   {aktuelleTurniere.length === 0 && vergangeneTurniere.length > 0 && (
@@ -7470,7 +7561,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                       {vergangeneTurniere.length > 0 ? <span className="kc-notiz"> · {vergangeneTurniere.length} vergangene Turnier(e) im Archiv unten</span> : null}
                     </div>
                   )}
-                  {aktuelleTurniere.map(karteRendern)}
+                  {listeRendern(aktuelleTurniere)}
                   {vergangeneTurniere.length > 0 && (
                     <div className="kc-archiv">
                       <button
@@ -7480,7 +7571,7 @@ function AdminAnsicht({ turniere, setTurniere, spielplaene, setSpielplaene, doku
                       >
                         {archivSichtbar ? "▾" : "▸"} Vergangene Turniere ({vergangeneTurniere.length})
                       </button>
-                      {archivSichtbar && vergangeneTurniere.map(karteRendern)}
+                      {archivSichtbar && listeRendern(vergangeneTurniere)}
                     </div>
                   )}
                 </>
@@ -9110,6 +9201,12 @@ const CSS = `
 .kc-whatsapp-ergebnis { margin-top: 8px; padding: 8px 10px; border-radius: 8px; background: #DDF3E3; color: #1E5B2E; font-size: 13px; display: flex; flex-direction: column; gap: 4px; }
 .kc-whatsapp-ergebnis--warnung { background: #FCF3DC; color: #7A5A00; }
 .kc-whatsapp-eingeladen { display: inline-block; margin-left: 6px; font-size: 11px; color: #1E5B2E; background: #DDF3E3; border-radius: 10px; padding: 1px 7px; }
+.kc-ausrichter-block { margin-top: 18px; }
+.kc-ausrichter-kopf { font-size: 17px; margin: 0 0 8px; padding-bottom: 6px; border-bottom: 2px solid var(--kc-blue); color: var(--kc-text); }
+.kc-gruppieren-schalter { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; }
+.kc-quittungen-panel { background: #F4F6F7; border: 1.5px solid #D8DEE2; border-radius: 10px; padding: 12px 14px; margin-top: 10px; }
+.kc-quittungen-liste { list-style: none; margin: 8px 0 12px; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.kc-quittungen-zeile { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; background: #fff; border: 1px solid #E1E6E9; border-radius: 8px; padding: 8px 10px; }
 .kc-sponsoren-panel { background: #F4F6F7; border: 1.5px solid #D8DEE2; border-radius: 10px; padding: 12px 14px; margin-top: 10px; }
 .kc-sponsoren-liste { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0; }
 .kc-sponsor-eintrag { display: flex; flex-direction: column; align-items: center; gap: 6px; background: #fff; border: 1px solid #D8DEE2; border-radius: 8px; padding: 8px; }
