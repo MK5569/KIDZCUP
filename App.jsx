@@ -2047,6 +2047,54 @@ async function spielplanAlsPdfHerunterladen(plan, teams, turnier, sponsoren = []
     kopfUntenY = Math.max(kopfUntenY, qrY + qrGroesse + 3.5);
   }
 
+  // Sponsoren: direkt unter dem QR-Code, rechtsbündig, in kleinen Zeilen (seitenverhältnistreu).
+  // jsPDF bettet zuverlässig JPEG/PNG/WEBP ein - alles andere (z. B. GIF) wird übersprungen statt das PDF abstürzen zu lassen.
+  const sponsorenEinbettbar = sponsorenBilder
+    .map((bild) => {
+      const erkanntesFormat = /^data:image\/(\w+);/.exec(bild.dataUrl)?.[1]?.toUpperCase();
+      return { ...bild, format: erkanntesFormat === "JPG" ? "JPEG" : erkanntesFormat };
+    })
+    .filter((bild) => ["JPEG", "PNG", "WEBP"].includes(bild.format) && bild.breite > 0 && bild.hoehe > 0);
+  if (sponsorenEinbettbar.length > 0) {
+    const sponsorHoehe = 9; // mm
+    const sponsorAbstand = 4;
+    const maxZeilenBreite = 100; // mm, rechts neben dem Vereinslogo bleibt genug Platz
+    const rechtsX = seitenBreite - 14;
+    const zeilen = [];
+    let aktuelle = { logos: [], breite: 0 };
+    sponsorenEinbettbar.forEach((bild) => {
+      const breite = Math.min((bild.breite / bild.hoehe) * sponsorHoehe, maxZeilenBreite);
+      const zusatz = (aktuelle.logos.length ? sponsorAbstand : 0) + breite;
+      if (aktuelle.logos.length && aktuelle.breite + zusatz > maxZeilenBreite) {
+        zeilen.push(aktuelle);
+        aktuelle = { logos: [], breite: 0 };
+      }
+      aktuelle.breite += (aktuelle.logos.length ? sponsorAbstand : 0) + breite;
+      aktuelle.logos.push({ bild, breite });
+    });
+    if (aktuelle.logos.length) zeilen.push(aktuelle);
+
+    let sy = kopfUntenY + 3;
+    doc.setFontSize(7);
+    doc.setTextColor(120, 120, 120);
+    doc.text("Vielen Dank an unsere Sponsoren", rechtsX, sy + 2, { align: "right" });
+    doc.setTextColor(0, 0, 0);
+    sy += 4;
+    zeilen.forEach((zeile) => {
+      let x = rechtsX - zeile.breite;
+      zeile.logos.forEach(({ bild, breite }) => {
+        try {
+          doc.addImage(bild.dataUrl, bild.format, x, sy, breite, sponsorHoehe);
+        } catch {
+          // Einzelnes Logo lässt sich nicht einbetten - restliches PDF trotzdem fertigstellen.
+        }
+        x += breite + sponsorAbstand;
+      });
+      sy += sponsorHoehe + 3;
+    });
+    kopfUntenY = Math.max(kopfUntenY, sy);
+  }
+
   y = kopfUntenY + 8;
 
   const neueZeilePruefen = (hoehe = 7) => {
@@ -2197,42 +2245,6 @@ async function spielplanAlsPdfHerunterladen(plan, teams, turnier, sponsoren = []
       y = pdfTabellenzeile(doc, 14, y, nrSpalten, [String(spielNr[s.id] || ""), zeitFeldText(s), teamName(s.heimId), ergebnis, teamName(s.gastId)]);
       y += 8;
     }
-  }
-
-  if (sponsorenBilder.length > 0) {
-    neueZeilePruefen(30);
-    y += 4;
-    doc.setDrawColor(220, 220, 220);
-    doc.line(14, y, seitenBreite - 14, y);
-    y += 7;
-    doc.setFontSize(8.5);
-    doc.setTextColor(120, 120, 120);
-    doc.text("Unsere Sponsoren", 14, y);
-    doc.setTextColor(0, 0, 0);
-    y += 6;
-    const zielHoehe = 14; // mm, Breite wird seitenverhältnistreu berechnet
-    const abstand = 6;
-    let x = 14;
-    sponsorenBilder.forEach((bild) => {
-      const breite = (bild.breite / bild.hoehe) * zielHoehe;
-      if (x + breite > seitenBreite - 14) {
-        x = 14;
-        y += zielHoehe + abstand;
-        neueZeilePruefen(zielHoehe + abstand);
-      }
-      // jsPDF unterstützt zuverlässig JPEG/PNG/WEBP - alles andere (z. B. GIF) wird
-      // übersprungen statt das ganze PDF zum Absturz zu bringen.
-      const erkanntesFormat = /^data:image\/(\w+);/.exec(bild.dataUrl)?.[1]?.toUpperCase();
-      const format = erkanntesFormat === "JPG" ? "JPEG" : erkanntesFormat;
-      if (["JPEG", "PNG", "WEBP"].includes(format)) {
-        try {
-          doc.addImage(bild.dataUrl, format, x, y, breite, zielHoehe);
-        } catch {
-          // Einzelnes Logo lässt sich nicht einbetten - restliches PDF trotzdem fertigstellen.
-        }
-      }
-      x += breite + abstand;
-    });
   }
 
   doc.save(`spielplan-${turnier.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.pdf`);
@@ -4850,7 +4862,7 @@ function SpielplanAnzeige({ plan, teams, turnier, bearbeitbar, onSpielSpeichern,
       {aufAbstiegBlock}
       {turnier && turnier.sponsoren && turnier.sponsoren.length > 0 && (
         <div className="kc-sponsoren-leiste">
-          <span className="kc-sponsoren-leiste__label">Unsere Sponsoren</span>
+          <span className="kc-sponsoren-leiste__label">Vielen Dank an unsere Sponsoren</span>
           <div className="kc-sponsoren-leiste__logos">
             {turnier.sponsoren.map((sp) => (
               <img key={sp.id} src={dateiOeffentlicheUrl(sp.logoPfad)} alt="Sponsor-Logo" />
